@@ -57,6 +57,18 @@ sudo bash install.sh    # 别这样
 macOS 上请注意：Ollama 装完后要**先打开一次 Ollama.app**（首次启动会弹确认），它才会监听 11434；
 脚本检测到服务没起时会提示并执行 `open -a Ollama`。
 
+**装 OpenClaw 那一步**（它是 npm 全局包）在 mac 上单独有个坑：官方 Node 安装包把 npm 的全局目录
+给了 root，直接 `npm install -g` 会没权限、很多人于是去 `sudo npm`。脚本不会这么干 ——
+它检测到全局目录不可写时，会把它改到用户级的 `~/.npm-global`（npm 官方推荐的做法，
+之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
+
+这步通常要 **1~3 分钟**，中间屏幕可能长时间只有一条进度条 —— 那不是卡住。
+如果超过 5 分钟完全没动静，多半是连 npm 官方源慢，可以先换镜像再重跑：
+
+```bash
+npm config set registry https://registry.npmmirror.com
+```
+
 **脚本会做的**：检查 Python 3.8+ → 装/起 Ollama → 拉 `gpt-oss:120b-cloud`（对话）和
 `gemma4:31b-cloud`（看图 / OCR）→ 装 OpenClaw → 生成 `config.json` 指向本机 Ollama。
 

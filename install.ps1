@@ -153,7 +153,10 @@ if (Get-Command openclaw -ErrorAction SilentlyContinue) {
         Invoke-Ask "winget install OpenJS.NodeJS.LTS" { winget install --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements }
         Refresh-Path
     }
-    Invoke-Ask "npm install -g openclaw" { npm install -g openclaw }
+    # --foreground-scripts：npm 7+ 默认把 postinstall 输出丢进后台日志，屏幕长时间空白
+    #   —— 这是"看着像卡住"的元凶；--no-fund --no-audit 省掉两次联网请求。
+    Warn "这一步通常 1~3 分钟，npm 会显示进度条 —— 没崩就是在装"
+    Invoke-Ask "npm install -g openclaw --no-fund --no-audit --foreground-scripts" { npm install -g openclaw --no-fund --no-audit --foreground-scripts }
     Refresh-Path
 }
 if (Get-Command openclaw -ErrorAction SilentlyContinue) {

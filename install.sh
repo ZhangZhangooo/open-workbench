@@ -135,11 +135,53 @@ else
     elif has apt-get; then run "sudo apt-get install -y nodejs npm"
     else warn "请先装 Node.js：https://nodejs.org"; fi
   fi
-  run "npm install -g openclaw"
+
+  if has npm; then
+    # npm 的全局目录要能写。官方 Node 安装包在 mac 上把 /usr/local 给了 root，
+    # 于是 npm -g 就得 sudo —— 但 sudo 装完会留下一堆 root 属主的缓存文件，
+    # 之后每次 -g 都得 sudo。npm 官方推荐的解法是换到用户级目录，一劳永逸。
+    NPM_PREFIX="$(npm config get prefix 2>/dev/null | tr -d '\r')"
+    if [[ -n "$NPM_PREFIX" && ! -w "$NPM_PREFIX" ]]; then
+      warn "npm 全局目录 $NPM_PREFIX 当前用户不可写（mac 上直接 npm -g 就得 sudo）"
+      printf "    换成用户级目录，以后所有 ${B}npm -g${N} 都不再需要 sudo：\n"
+      run "mkdir -p \"$HOME/.npm-global\" && npm config set prefix \"$HOME/.npm-global\""
+      NPM_PREFIX="$HOME/.npm-global"
+      export PATH="$NPM_PREFIX/bin:$PATH"
+      hash -r 2>/dev/null || true
+      # 让新开的终端也找得到（已配置过就跳过）
+      RC="$HOME/.bashrc"; [[ -f "$HOME/.zshrc" ]] && RC="$HOME/.zshrc"
+      if ! grep -q "npm-global/bin" "$RC" 2>/dev/null; then
+        warn "把 $NPM_PREFIX/bin 写进 $RC，新终端才能找到 openclaw"
+        run "echo 'export PATH=\"\$HOME/.npm-global/bin:\$PATH\"' >> \"$RC\""
+      fi
+    fi
+
+    # --foreground-scripts：npm 7+ 默认把 postinstall 的输出丢进后台日志，屏幕上长时间
+    #   一片空白 —— 这就是"看着像卡住"的元凶之一，放到前台才看得到进度。
+    # --no-fund --no-audit：省掉两次联网请求，装得更快。
+    warn "这一步通常 1~3 分钟，npm 会显示进度条 —— 没崩就是在装，别急"
+    if [[ -w "$NPM_PREFIX" ]]; then
+      run "npm install -g openclaw --no-fund --no-audit --foreground-scripts"
+    elif [[ -n "$SUDO" ]]; then
+      warn "要装到 $NPM_PREFIX（需要管理员权限）：会先要一次开机密码，"
+      printf "    ${B}输密码时屏幕不显示字符，这是正常的${N}，输完回车即可。\n"
+      $SUDO -v || warn "sudo 认证没通过，下面这步可能失败"
+      run "$SUDO npm install -g openclaw --no-fund --no-audit --foreground-scripts --unsafe-perm"
+    else
+      warn "没有 sudo 且全局目录不可写，这一步得你手动来："
+      printf "    ${B}npm install -g openclaw --no-fund --no-audit --foreground-scripts${N}\n"
+      printf "    如果长时间没动静，多半是连 registry.npmjs.org 慢，可换国内镜像：\n"
+      printf "    ${B}npm config set registry https://registry.npmmirror.com${N}\n"
+    fi
+    hash -r 2>/dev/null || true
+  fi
 fi
 if has openclaw; then
   if openclaw health >/dev/null 2>&1; then ok "Gateway 已在运行"
   else warn "Gateway 没起。要用 OpenClaw 就另开一个终端跑：openclaw gateway run --port 18789"; fi
+else
+  warn "这一步之后还是找不到 openclaw —— 多半是新装的 bin 目录不在当前 PATH 里。"
+  printf "    试试：${B}export PATH=\"\$HOME/.npm-global/bin:\$PATH\"${N}，或重开一个终端。\n"
 fi
 
 # ---------- 5 config.json ----------
