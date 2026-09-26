@@ -1,0 +1,12 @@
+# 行尾规范：shell / Python / 前端必须 LF，否则 bash 会报 "\r: command not found"
+# Windows 脚本反过来要 CRLF（.bat 在纯 LF 下可能整段不执行）
+*.sh    text eol=lf
+*.py    text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf

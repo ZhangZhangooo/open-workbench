@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # OpenWorkbench 环境一键脚本（macOS / Linux）
 #
-#   bash install.sh          # 每一步都先告诉你命令、等你按回车才执行
+#   bash install.sh          # 免 chmod；每一步都先告诉你命令、等你按回车才执行
 #   bash install.sh --yes    # 全自动，不再询问（CI / 熟练用户）
+#
+#   想用 ./install.sh 这种写法，先赋一次执行权限即可：
+#     chmod +x install.sh && ./install.sh
+#
+#   ⚠️ 不要 `sudo bash install.sh`：
+#      整体提权会把模型下进 root 的家目录（你自己跑 ollama list 反而看不到），
+#      config.json 也会归 root 所有。脚本会在真正需要提权的那一步自己 sudo。
 #
 # 它做的事：
 #   1 检查 Python 3.8+      2 装/起 Ollama      3 拉两个云端模型
@@ -41,7 +48,19 @@ run() {
   else warn "已跳过"; fi
 }
 
+# 提权策略：只在真正需要的步骤单独 sudo，绝不整体提权
+IS_ROOT=0; [[ "$(id -u)" == 0 ]] && IS_ROOT=1
+SUDO=""
+if [[ "$IS_ROOT" == 0 ]] && has sudo; then SUDO="sudo"; fi
+
 printf "${B}OpenWorkbench 环境配置${N}  (macOS / Linux)\n"
+
+if [[ "$IS_ROOT" == 1 ]]; then
+  warn "当前是 root：模型会装进 root 家目录、config.json 会归 root 所有。"
+  printf "        建议退出 root 后重跑（脚本会在需要时自己 sudo）。\n"
+elif [[ -z "$SUDO" ]]; then
+  warn "没找到 sudo：需要装 Ollama / 系统包时，脚本会打印命令请你手动执行。"
+fi
 
 # ---------- 1 Python ----------
 say "1/5  Python（工作台本体只需要标准库，但至少 3.8）"
@@ -53,7 +72,10 @@ if [[ -z "$PY" ]] || ! "$PY" -c 'import sys' >/dev/null 2>&1; then
   if has python3; then PY=python3; elif has python; then PY=python; fi
 fi
 if [[ -n "$PY" ]]; then
-  read -r maj min < <("$PY" -c 'import sys;print(sys.version_info[0],sys.version_info[1])')
+  # tr -d '\r'：Windows 上的 Python 会把 \n 输出成 \r\n，不去掉会让下面
+  # 的算术判断报 "invalid arithmetic operator"（3.13 被误判成版本太低）
+  read -r maj min < <("$PY" -c 'import sys;print(sys.version_info[0],sys.version_info[1])' | tr -d '\r')
+  maj="${maj%$'\r'}"; min="${min%$'\r'}"
   if (( maj > 3 || (maj == 3 && min >= 8) )); then ok "Python $maj.$min ($PY)"
   else die "Python $maj.$min 太低，需要 3.8+，请升级后再跑"; fi
 else
@@ -69,14 +91,28 @@ say "2/5  Ollama（本机模型运行时，工作台的 AI 全靠它）"
 if has ollama; then
   ok "已装 Ollama"
 else
-  warn "未装 Ollama（官方脚本会装到 /usr/local 并注册服务）"
-  run "curl -fsSL https://ollama.com/install.sh | sh"
+  OI="curl -fsSL https://ollama.com/install.sh | sh"
+  if [[ -n "$SUDO" ]]; then OI="$SUDO sh -c '$OI'"; fi
+  if [[ -n "$SUDO" || "$IS_ROOT" == 1 ]]; then
+    warn "未装 Ollama。官方脚本要写 /usr/local，所以这一步会 ${B}单独 sudo${N}"
+    run "$OI"
+  else
+    warn "未装 Ollama，且当前环境没有 sudo，这一步得你手动来："
+    printf "    ${B}%s${N}\n" "curl -fsSL https://ollama.com/install.sh | sh"
+    printf "    装完（或改由管理员装好）后，重新跑本脚本即可继续。\n"
+  fi
 fi
 if curl -fsS "$OLLAMA_API/api/tags" >/dev/null 2>&1; then
   ok "Ollama 服务已在 11434 运行"
 else
-  warn "Ollama 没在跑，后台起一下"
-  run "(ollama serve >/tmp/ollama-serve.log 2>&1 &)"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    warn "macOS 上请先打开 Ollama.app（首次启动会让你确认），它会自动监听 11434"
+    printf "    ${B}open -a Ollama${N}\n"
+    run "open -a Ollama"
+  else
+    warn "Ollama 没在跑，后台起一下"
+    run "(ollama serve >/tmp/ollama-serve.log 2>&1 &)"
+  fi
   sleep 3
   curl -fsS "$OLLAMA_API/api/tags" >/dev/null 2>&1 && ok "Ollama 起来了" || warn "还是没起来，看 /tmp/ollama-serve.log"
 fi
@@ -84,7 +120,7 @@ fi
 # ---------- 3 模型 ----------
 say "3/5  拉模型（这两个是云端模型，只有几百字节的代理壳，不下权重）"
 for m in "$CHAT_MODEL" "$VISION_MODEL"; do
-  if ollama list 2>/dev/null | grep -q "^${m}"; then ok "已有 $m"
+  if ollama list 2>/dev/null | tr -d '\r' | grep -q "^${m}"; then ok "已有 $m"
   else run "ollama pull $m"; fi
 done
 

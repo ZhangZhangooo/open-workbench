@@ -32,6 +32,31 @@
 
 想全自动、不再逐步确认：`install.ps1 -Yes` / `install.sh --yes`
 
+### macOS / Linux：怎么跑、要不要 sudo
+
+```bash
+bash install.sh               # 最省事，不需要 chmod
+chmod +x install.sh && ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
+```
+
+> 从 Git clone 下来的 `install.sh` 已经带执行位，理论上 `./install.sh` 就能跑；
+> 如果报 `Permission denied`，补一次 `chmod +x install.sh` 即可。
+
+**⚠️ 别给整个脚本加 sudo：**
+
+```bash
+sudo bash install.sh    # 别这样
+```
+
+整体提权有两个副作用：模型会被下载到 **root 的家目录**（之后你自己跑 `ollama list` 反而看不到），
+`config.json` 也会归 root 所有、你的工作台进程改不动它。
+
+脚本的正确姿势是：**以普通用户运行，只在真正需要管理员权限的那一步（把 Ollama 装进 `/usr/local`）单独 `sudo`**，
+而且默认会先把命令打出来等你按回车。没装 `sudo` 或以 root 登录时，脚本会检测到并把该手动执行的命令打印给你。
+
+macOS 上请注意：Ollama 装完后要**先打开一次 Ollama.app**（首次启动会弹确认），它才会监听 11434；
+脚本检测到服务没起时会提示并执行 `open -a Ollama`。
+
 **脚本会做的**：检查 Python 3.8+ → 装/起 Ollama → 拉 `gpt-oss:120b-cloud`（对话）和
 `gemma4:31b-cloud`（看图 / OCR）→ 装 OpenClaw → 生成 `config.json` 指向本机 Ollama。
 
