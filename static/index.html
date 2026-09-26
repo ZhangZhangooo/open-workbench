@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工作台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="shell">
+
+  <div class="topstat" id="topstat">
+    <span class="led" title="在线"></span>
+    <span class="brand">OPENCLAW <b>▸</b> WORKBENCH</span>
+    <span class="ver">v0.9 · local</span>
+    <span class="gap"></span>
+    <span class="m">UPTIME <b id="mUptime">--:--:--</b></span>
+    <span class="m">CPU <span class="mbar" id="mCpuBar"><i id="mCpu"></i></span></span>
+    <span class="m">MEM <b id="mMem">--</b></span>
+    <span class="m">DISK <b id="mDisk">--</b></span>
+        <span class="m clk" id="mClock">--:--:--</span>
+        <span class="m" id="cloudStat" style="display:none"></span>
+        <span class="kicon" id="btnCmd2" title="命令面板 (Ctrl/⌘ K)">⌘K</span>
+  </div>
+
+  <div class="body">
+    <aside>
+      <div class="side-lbl">Modules</div>
+      <div id="mods"></div>
+      <div class="console" id="console">
+        <div class="ct">Console</div>
+        <div id="consoleLines"></div>
+      </div>
+      <div class="side-foot">
+        <button id="btnTheme">主题</button>
+        <button id="btnCmd">命令</button>
+      </div>
+    </aside>
+
+    <div class="rail">
+      <div class="topbar">
+        <div class="t" id="topTitle">今日</div>
+        <div class="sp">
+          <span id="topState"></span>
+          <span class="kbd" id="dot"></span>
+        </div>
+      </div>
+      <div id="stage"></div>
+    </div>
+  </div>
+</div>
+
+<div class="cmdk" id="cmdk">
+  <div class="cmdk-box">
+    <input id="cmdInput" placeholder="输入命令、文件名，或者直接记点什么…" autocomplete="off">
+    <div class="cmdk-list" id="cmdList"></div>
+  </div>
+</div>
+
+<div class="cmdk" id="launch">
+  <div class="cmdk-box">
+    <input id="lcInput" placeholder="启动程序、打开文件…" autocomplete="off">
+    <div class="cmdk-list" id="lcList"></div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<!-- 云同步：CDN SDK（经典脚本，先执行）+ cloud.js（设置 window.CloudSync），再加载 core.js -->
+<script src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"></script>
+<script src="/static/cloud.js"></script>
+<script type="module" src="/static/core.js"></script>
+</body>
+</html>

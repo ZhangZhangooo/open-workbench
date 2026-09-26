@@ -1,0 +1,27 @@
+# ---- 隐私配置（含邮箱密码、AI key 等真实凭据）：绝不提交 ----
+config.json
+
+# ---- 运行数据 ----
+data/
+exports/
+*.db
+*.db-*
+*.db-journal
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ---- 发布构建产物（如有） ----
+dist/
+build/
+node_modules/
