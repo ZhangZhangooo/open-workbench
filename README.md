@@ -54,13 +54,25 @@ sudo bash install.sh    # 别这样
 脚本的正确姿势是：**以普通用户运行，只在真正需要管理员权限的那一步（把 Ollama 装进 `/usr/local`）单独 `sudo`**，
 而且默认会先把命令打出来等你按回车。没装 `sudo` 或以 root 登录时，脚本会检测到并把该手动执行的命令打印给你。
 
-macOS 上请注意：Ollama 装完后要**先打开一次 Ollama.app**（首次启动会弹确认），它才会监听 11434；
-脚本检测到服务没起时会提示并执行 `open -a Ollama`。
+### mac 上默认走 Homebrew（免 sudo）
 
-**装 OpenClaw 那一步**（它是 npm 全局包）在 mac 上单独有个坑：官方 Node 安装包把 npm 的全局目录
-给了 root，直接 `npm install -g` 会没权限、很多人于是去 `sudo npm`。脚本不会这么干 ——
-它检测到全局目录不可写时，会把它改到用户级的 `~/.npm-global`（npm 官方推荐的做法，
-之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
+检测到装了 Homebrew 时，脚本会这样装 —— brew 的目录（`Apple Silicon` 上是 `/opt/homebrew`）归你
+自己的用户，所以**全程不需要 sudo**：
+
+```bash
+brew install ollama && brew services start ollama   # 后者会注册成开机自启
+brew install node                                    # npm 全局目录落在 brew 下，归你自己
+```
+
+没有 brew 时才会退回官方安装脚本（那一步需要 sudo）。另外 brew 不能在 root 下运行，
+所以脚本检测到你是 root 时会跳过 brew 路线。
+
+> **只有 OpenClaw 必须走 npm** —— Homebrew 里没有 `openclaw` 这个包（查过了，404），
+> 它是 npm 全局包，没别的装法。
+
+如果 npm 的全局目录不可写（官方 Node 安装包把 `/usr/local` 给了 root，直接 `npm install -g`
+会没权限），脚本有两条出路：**先用 brew 装 Node**（全局目录归你自己）；不行再改成用户级的
+`~/.npm-global`（npm 官方推荐的做法，之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
 
 这步通常要 **1~3 分钟**，中间屏幕可能长时间只有一条进度条 —— 那不是卡住。
 如果超过 5 分钟完全没动静，多半是连 npm 官方源慢，可以先换镜像再重跑：

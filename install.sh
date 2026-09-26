@@ -53,6 +53,12 @@ IS_ROOT=0; [[ "$(id -u)" == 0 ]] && IS_ROOT=1
 SUDO=""
 if [[ "$IS_ROOT" == 0 ]] && has sudo; then SUDO="sudo"; fi
 
+# macOS 上有 Homebrew 就优先用它：brew 把 /opt/homebrew 给了当前用户，
+# 装 Ollama / Node 都不需要 sudo（brew 本身也拒绝在 root 下运行）。
+IS_MAC=0; [[ "$(uname -s)" == "Darwin" ]] && IS_MAC=1
+HAS_BREW=0
+if has brew && [[ "$IS_ROOT" == 0 ]]; then HAS_BREW=1; fi   # brew 拒绝在 root 下运行
+
 printf "${B}OpenWorkbench 环境配置${N}  (macOS / Linux)\n"
 
 if [[ "$IS_ROOT" == 1 ]]; then
@@ -93,7 +99,13 @@ if has ollama; then
 else
   OI="curl -fsSL https://ollama.com/install.sh | sh"
   if [[ -n "$SUDO" ]]; then OI="$SUDO sh -c '$OI'"; fi
-  if [[ -n "$SUDO" || "$IS_ROOT" == 1 ]]; then
+  if [[ "$IS_MAC" == 1 && "$HAS_BREW" == 1 ]]; then
+    # 首选：Homebrew。装进 /opt/homebrew（归你自己的用户），全程不需要 sudo
+    warn "未装 Ollama。macOS 上用 Homebrew 装最省事，${B}不需要 sudo${N}"
+    run "brew install ollama"
+  elif [[ -n "$SUDO" || "$IS_ROOT" == 1 ]]; then
+    # Linux 上不用 brew 装 Ollama：homebrew-core 那份只有 CPU 后端，
+    # 官方脚本才会按你的显卡装对应后端
     warn "未装 Ollama。官方脚本要写 /usr/local，所以这一步会 ${B}单独 sudo${N}"
     run "$OI"
   else
@@ -105,16 +117,24 @@ fi
 if curl -fsS "$OLLAMA_API/api/tags" >/dev/null 2>&1; then
   ok "Ollama 服务已在 11434 运行"
 else
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    warn "macOS 上请先打开 Ollama.app（首次启动会让你确认），它会自动监听 11434"
+  if [[ "$HAS_BREW" == 1 ]] && brew list ollama >/dev/null 2>&1; then
+    warn "Ollama 是 Homebrew 装的，用 brew services 起（之后开机自动运行）"
+    run "brew services start ollama"
+  elif [[ "$IS_MAC" == 1 ]]; then
+    warn "macOS 上请先打开 Ollama.app（首次启动会弹确认），它会自动监听 11434"
     printf "    ${B}open -a Ollama${N}\n"
     run "open -a Ollama"
   else
     warn "Ollama 没在跑，后台起一下"
     run "(ollama serve >/tmp/ollama-serve.log 2>&1 &)"
   fi
-  sleep 3
-  curl -fsS "$OLLAMA_API/api/tags" >/dev/null 2>&1 && ok "Ollama 起来了" || warn "还是没起来，看 /tmp/ollama-serve.log"
+  # 服务启动要几秒，轮询而不是死等固定时长
+  for _ in 1 2 3 4 5 6; do
+    curl -fsS "$OLLAMA_API/api/tags" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  curl -fsS "$OLLAMA_API/api/tags" >/dev/null 2>&1 && ok "Ollama 起来了" \
+    || warn "还是没起来。brew 装的看：brew services info ollama；其他看 /tmp/ollama-serve.log"
 fi
 
 # ---------- 3 模型 ----------
@@ -131,28 +151,42 @@ if has openclaw; then
 else
   if ! has npm; then
     warn "没找到 npm（OpenClaw 是 npm 全局包）"
-    if has brew; then run "brew install node"
+    if [[ "$HAS_BREW" == 1 ]]; then run "brew install node"
     elif has apt-get; then run "sudo apt-get install -y nodejs npm"
     else warn "请先装 Node.js：https://nodejs.org"; fi
+    # brew 的 bin 目录可能不在 PATH 里（Apple Silicon 是 /opt/homebrew）
+    if [[ "$HAS_BREW" == 1 ]]; then export PATH="$(brew --prefix)/bin:$PATH"; hash -r 2>/dev/null || true; fi
   fi
 
   if has npm; then
     # npm 的全局目录要能写。官方 Node 安装包在 mac 上把 /usr/local 给了 root，
     # 于是 npm -g 就得 sudo —— 但 sudo 装完会留下一堆 root 属主的缓存文件，
-    # 之后每次 -g 都得 sudo。npm 官方推荐的解法是换到用户级目录，一劳永逸。
+    # 之后每次 -g 都得 sudo。两条出路：用 brew 的 node（全局目录归用户），
+    # 或把目录换到用户级，都是一劳永逸。
     NPM_PREFIX="$(npm config get prefix 2>/dev/null | tr -d '\r')"
     if [[ -n "$NPM_PREFIX" && ! -w "$NPM_PREFIX" ]]; then
-      warn "npm 全局目录 $NPM_PREFIX 当前用户不可写（mac 上直接 npm -g 就得 sudo）"
-      printf "    换成用户级目录，以后所有 ${B}npm -g${N} 都不再需要 sudo：\n"
-      run "mkdir -p \"$HOME/.npm-global\" && npm config set prefix \"$HOME/.npm-global\""
-      NPM_PREFIX="$HOME/.npm-global"
-      export PATH="$NPM_PREFIX/bin:$PATH"
-      hash -r 2>/dev/null || true
-      # 让新开的终端也找得到（已配置过就跳过）
-      RC="$HOME/.bashrc"; [[ -f "$HOME/.zshrc" ]] && RC="$HOME/.zshrc"
-      if ! grep -q "npm-global/bin" "$RC" 2>/dev/null; then
-        warn "把 $NPM_PREFIX/bin 写进 $RC，新终端才能找到 openclaw"
-        run "echo 'export PATH=\"\$HOME/.npm-global/bin:\$PATH\"' >> \"$RC\""
+      # 出路一：改用 Homebrew 的 Node（它的全局目录在 brew 目录下，归你自己）
+      if [[ "$HAS_BREW" == 1 ]] && ! brew list node >/dev/null 2>&1; then
+        warn "npm 全局目录 $NPM_PREFIX 不可写（官方 Node 包把 /usr/local 给了 root）"
+        printf "    改用 Homebrew 装 Node —— 它的全局目录 ${B}归你自己${N}，之后 npm -g 都不用 sudo\n"
+        run "brew install node"
+        export PATH="$(brew --prefix)/bin:$PATH"; hash -r 2>/dev/null || true
+        NPM_PREFIX="$(npm config get prefix 2>/dev/null | tr -d '\r')"
+      fi
+      # 出路二：还是不可写（没 brew / 就是要用系统 node）→ 换到用户级目录
+      if [[ -n "$NPM_PREFIX" && ! -w "$NPM_PREFIX" ]]; then
+        warn "npm 全局目录 $NPM_PREFIX 当前用户不可写（mac 上直接 npm -g 就得 sudo）"
+        printf "    换成用户级目录，以后所有 ${B}npm -g${N} 都不再需要 sudo：\n"
+        run "mkdir -p \"$HOME/.npm-global\" && npm config set prefix \"$HOME/.npm-global\""
+        NPM_PREFIX="$HOME/.npm-global"
+        export PATH="$NPM_PREFIX/bin:$PATH"
+        hash -r 2>/dev/null || true
+        # 让新开的终端也找得到（已配置过就跳过）
+        RC="$HOME/.bashrc"; [[ -f "$HOME/.zshrc" ]] && RC="$HOME/.zshrc"
+        if ! grep -q "npm-global/bin" "$RC" 2>/dev/null; then
+          warn "把 $NPM_PREFIX/bin 写进 $RC，新终端才能找到 openclaw"
+          run "echo 'export PATH=\"\$HOME/.npm-global/bin:\$PATH\"' >> \"$RC\""
+        fi
       fi
     fi
 
