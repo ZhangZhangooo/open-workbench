@@ -46,7 +46,12 @@ printf "${B}OpenWorkbench 环境配置${N}  (macOS / Linux)\n"
 # ---------- 1 Python ----------
 say "1/5  Python（工作台本体只需要标准库，但至少 3.8）"
 PY=""
-if has python3; then PY=python3; elif has python; then PY=python; fi
+# 本机覆盖文件（可选、不提交）：第一行写 python 解释器的完整路径
+if [[ -f .python-path ]]; then IFS= read -r PY < .python-path; fi
+if [[ -z "$PY" ]] || ! "$PY" -c 'import sys' >/dev/null 2>&1; then
+  PY=""
+  if has python3; then PY=python3; elif has python; then PY=python; fi
+fi
 if [[ -n "$PY" ]]; then
   read -r maj min < <("$PY" -c 'import sys;print(sys.version_info[0],sys.version_info[1])')
   if (( maj > 3 || (maj == 3 && min >= 8) )); then ok "Python $maj.$min ($PY)"
@@ -132,7 +137,8 @@ if not cfg["ocr"].get("model"):
     cfg["ocr"]["model"] = os.environ["VISION_MODEL"]   # 看图 / OCR
 
 json.dump(cfg, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-print("  [ok] config.json 就绪：ai=%s  ocr=%s" % (ai.get("model"), cfg["ocr"].get("model")))
+# 用 ASCII 输出，避免不同终端编码导致的乱码
+print("  [ok] config.json ready  ai=%s  ocr=%s" % (ai.get("model"), cfg["ocr"].get("model")))
 PYEOF
 
 say "完成"
