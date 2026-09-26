@@ -26,7 +26,7 @@ export default {
             <div style="flex:1;min-width:150px"><label>地点（可选）</label><input id="mLoc" placeholder="如：会议室A / 腾讯会议"></div>
             <div style="flex:1;min-width:180px"><label>线上链接 / 会议号（可选）</label><input id="mLink" placeholder="https://... 或 会议号"></div>
           </div>
-          <div class="field"><label>参会人（可选，逗号分隔）</label><input id="mAtt" placeholder="如：慢慢,小吴"></div>
+          <div class="field"><label>参会人（可选，逗号分隔）</label><input id="mAtt" placeholder="如：张三,李四"></div>
           <div class="field"><label>备注（可选）</label><input id="mNote" placeholder="议题、准备事项…"></div>
           <div class="field" style="display:flex;gap:8px;align-items:flex-end">
             <div style="width:170px"><label>会前提醒（分钟）</label>

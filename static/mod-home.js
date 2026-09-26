@@ -35,7 +35,7 @@ export default {
 
         <div class="hero" id="hero">
           <div class="hero-l">
-            <div class="hero-greet" id="heroGreet">你好，慢慢</div>
+            <div class="hero-greet" id="heroGreet">你好</div>
             <div class="hero-date" id="heroDate"></div>
             <div class="hero-clock" id="heroClock">--:--:--</div>
           </div>
@@ -254,12 +254,16 @@ export default {
   renderHero() {
     const d = new Date();
     const h = d.getHours();
-    const greet = h < 5 ? '夜深了，慢慢'
-      : h < 11 ? '早上好，慢慢'
-      : h < 13 ? '中午好，慢慢'
-      : h < 18 ? '下午好，慢慢'
-      : h < 23 ? '晚上好，慢慢'
-      : '夜深了，慢慢';
+    // 称呼不硬编码进开源仓库：想在问候里显示自己的名字，就在浏览器控制台执行
+    // localStorage.setItem('wb_user_name','你的称呼')；默认为空 = 只显示问候语。
+    const nm = (localStorage.getItem('wb_user_name') || '').trim();
+    const tail = nm ? '，' + nm : '';
+    const greet = h < 5 ? '夜深了' + tail
+      : h < 11 ? '早上好' + tail
+      : h < 13 ? '中午好' + tail
+      : h < 18 ? '下午好' + tail
+      : h < 23 ? '晚上好' + tail
+      : '夜深了' + tail;
     const g = this.el.querySelector('#heroGreet');
     if (g) g.textContent = greet;
     const dt = this.el.querySelector('#heroDate');

@@ -2,7 +2,7 @@
 
 为什么用 Markdown 当中转：
   1) 模型输出 Markdown 比输出 JSON 稳得多，不容易出格式错；
-  2) 慢慢自己写的笔记、OpenClaw 的产出也都是 Markdown，一条路打通。
+  2) 用户自己写的笔记、OpenClaw 的产出也都是 Markdown，一条路打通。
 
 生成的 .docx / .pptx 能被 WPS 文字 / WPS 演示直接打开。
 """

@@ -645,7 +645,9 @@ function finishBoot(lastModule) {
 }
 
 // 专属欢迎提示：用指定邮箱登录时弹「您好！尊敬的开发者！」
-const DEV_EMAIL = 'wusongyyds@126.com';
+// 不把个人邮箱硬编码进开源仓库：想给自己开这个「开发者问候」小灶，
+// 就在浏览器控制台执行 localStorage.setItem('wb_dev_email','你的邮箱')。默认为空 = 不触发。
+const DEV_EMAIL = localStorage.getItem('wb_dev_email') || '';
 let greeted = false;
 function greetIfDev(s) {
   if (greeted) return;

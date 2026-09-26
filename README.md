@@ -1,4 +1,4 @@
-# 慢慢的工作台 (Manman's Workbench)
+# OpenWorkbench
 
 本地优先的个人工作台。前端 + 后端一体、**零第三方依赖**（只用 Python 标准库），
 自带 Ollama / OpenClaw / 文件检索 / 终端 / 系统状态等本机能力。
