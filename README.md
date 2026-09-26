@@ -6,6 +6,18 @@
 只用 Python 标准库，`pip install` 什么都不用装。每个人跑自己的实例、
 连自己本机的模型、各自做内网穿透 —— 这是「开源回环」的起点。
 
+## 长什么样
+
+| 客厅仪表盘 | 项目看板 |
+| --- | --- |
+| ![客厅仪表盘](docs/screenshots/home.png) | ![项目看板](docs/screenshots/projects.png) |
+
+| 功能全景（9 域 41 项） | 小工具 |
+| --- | --- |
+| ![功能全景](docs/screenshots/features.png) | ![小工具](docs/screenshots/tools.png) |
+
+> 截图是干净的本地实例，不含任何个人信息。
+
 ---
 
 ## 一键装好环境（新用户先看这里）
