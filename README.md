@@ -88,6 +88,16 @@ brew install --cask openclaw      # 装 /Applications/OpenClaw.app，要求 macO
 **先用 brew 装 Node**（全局目录归你自己）；不行再改成用户级的 `~/.npm-global`
 （npm 官方推荐的做法，之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
 
+装好之后脚本会多做一步（4.5）—— 用 Ollama 把 OpenClaw 拉起来，并指定对话模型：
+
+```bash
+ollama launch openclaw --model gpt-oss:120b-cloud -y
+```
+
+这一步**不会接入任何渠道**（微信 / 钉钉 / 邮件等都不接），想接的话自己跑 `openclaw onboard`。
+另外它会打开 OpenClaw 等你操作，所以 `-Yes` / `--yes` 全自动模式下脚本**只打印命令不自动执行**
+（免得在 CI 里卡住），你手动跑那一条即可。
+
 这步通常要 **1~3 分钟**，中间屏幕可能长时间只有一条进度条 —— 那不是卡住。
 如果超过 5 分钟完全没动静，多半是连 npm 官方源慢，可以先换镜像再重跑：
 

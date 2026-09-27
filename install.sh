@@ -228,13 +228,28 @@ else
       hash -r 2>/dev/null || true
     fi
   fi
-  if has openclaw; then
-    if openclaw health >/dev/null 2>&1; then ok "Gateway 已在运行"
-    else warn "Gateway 没起。要用 OpenClaw 就另开一个终端跑：openclaw gateway run --port 18789"; fi
-  else
-    warn "这一步之后还是找不到 openclaw —— 多半是新装的 bin 目录不在当前 PATH 里。"
-    printf "    试试：${B}export PATH=\"\$HOME/.npm-global/bin:\$PATH\"${N}，或重开一个终端。\n"
+fi
+
+# 结论：装没装成都要说清楚（这段必须在 if/else 外面，否则已装时不会检查 gateway）
+if has openclaw; then
+  if openclaw health >/dev/null 2>&1; then ok "Gateway 已在运行"
+  else warn "Gateway 没起。要用 OpenClaw 就另开一个终端跑：openclaw gateway run --port 18789"; fi
+
+  # 4.5 用 Ollama 把 OpenClaw 拉起来（官方推荐的接法）
+  if has ollama; then
+    say "4.5 用 Ollama 启动 OpenClaw（模型：$CHAT_MODEL）"
+    printf "    命令：${B}ollama launch openclaw --model $CHAT_MODEL -y${N}\n"
+    printf "    ${Y}不会接入任何渠道${N}（微信 / 钉钉等）；要接的话自己跑 ${B}openclaw onboard${N}。\n"
+    if [[ "$AUTO" == 1 ]]; then
+      warn "--yes 模式下不自动启动（它会打开 OpenClaw 等你操作），请手动跑上面那条命令"
+    else
+      run "ollama launch openclaw --model $CHAT_MODEL -y"
+    fi
   fi
+else
+  warn "OpenClaw 没装上 —— 工作台的「技能库 / 神经桥」用不了。可自己挑一条再试："
+  printf "    1) ${B}curl -fsSL https://openclaw.ai/install.sh | bash${N}\n"
+  printf "    2) ${B}npm install -g openclaw@latest --allow-scripts=openclaw${N}\n"
 fi
 
 # ---------- 5 config.json ----------

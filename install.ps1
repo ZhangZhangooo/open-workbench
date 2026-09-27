@@ -148,22 +148,50 @@ Say "4/5  OpenClaw（可选：技能库 / 神经桥要用；不用可以跳过�
 if (Get-Command openclaw -ErrorAction SilentlyContinue) {
     Ok "已装 OpenClaw"
 } else {
+    # 路线 1：官方安装脚本（自带 Node 运行时，不用先管 Node）
+    Warn "先用官方安装脚本装命令行版（它会自己准备 Node 运行时）"
+    Invoke-Ask "下载并执行官方安装脚本 https://openclaw.ai/install.ps1" {
+        $tmp = Join-Path $env:TEMP "openclaw-install.ps1"
+        Invoke-WebRequest -UseBasicParsing https://openclaw.ai/install.ps1 -OutFile $tmp
+        & $tmp
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Refresh-Path
+}
+# 路线 2：已经有 Node 的话直接装 npm 包
+if (-not (Get-Command openclaw -ErrorAction SilentlyContinue)) {
     if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-        Warn "没找到 npm（OpenClaw 是 npm 全局包）"
+        Warn "没找到 npm（OpenClaw 也提供 npm 包）"
         Invoke-Ask "winget install OpenJS.NodeJS.LTS" { winget install --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements }
         Refresh-Path
     }
-    # --foreground-scripts：npm 7+ 默认把 postinstall 输出丢进后台日志，屏幕长时间空白
-    #   —— 这是"看着像卡住"的元凶；--no-fund --no-audit 省掉两次联网请求。
+    # --allow-scripts=openclaw 是官方要求的：不带它 lifecycle 脚本不跑，装出来是残缺的。
+    # --foreground-scripts 把 postinstall 输出放回前台（否则屏幕长时间空白，像卡住）。
     Warn "这一步通常 1~3 分钟，npm 会显示进度条 —— 没崩就是在装"
-    Invoke-Ask "npm install -g openclaw --no-fund --no-audit --foreground-scripts" { npm install -g openclaw --no-fund --no-audit --foreground-scripts }
+    Invoke-Ask "npm install -g openclaw@latest --allow-scripts=openclaw --no-fund --no-audit --foreground-scripts" { npm install -g openclaw@latest --allow-scripts=openclaw --no-fund --no-audit --foreground-scripts }
     Refresh-Path
 }
+
+# 结论必须说清楚：装没装成、下一步怎么办
 if (Get-Command openclaw -ErrorAction SilentlyContinue) {
     $healthy = $false
     try { openclaw health 2>$null | Out-Null; $healthy = ($LASTEXITCODE -eq 0) } catch {}
     if ($healthy) { Ok "Gateway 已在运行" }
     else { Warn "Gateway 没起。要用 OpenClaw 就另开一个终端跑：openclaw gateway run --port 18789" }
+
+    # 4.5 用 Ollama 把 OpenClaw 拉起来（官方推荐的接法）
+    Say "4.5 用 Ollama 启动 OpenClaw（模型：$ChatModel）"
+    Warn "会执行：ollama launch openclaw --model $ChatModel -y"
+    Warn "不会接入任何渠道（微信 / 钉钉等）—— 需要的话自己跑 openclaw onboard"
+    if ($Yes) {
+        Warn "-Yes 模式下不自动启动（它会打开 OpenClaw 等你操作），请手动跑上面那条命令"
+    } else {
+        Invoke-Ask "ollama launch openclaw --model $ChatModel -y" { ollama launch openclaw --model $ChatModel -y }
+    }
+} else {
+    Warn "OpenClaw 没装上 —— 工作台的「技能库 / 神经桥」用不了。可自己挑一条再试："
+    Warn "  1) iwr -useb https://openclaw.ai/install.ps1 | iex"
+    Warn "  2) npm install -g openclaw@latest --allow-scripts=openclaw"
 }
 
 # ---------- 5 config.json ----------
