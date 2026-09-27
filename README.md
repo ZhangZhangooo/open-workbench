@@ -67,12 +67,26 @@ brew install node                                    # npm 全局目录落在 br
 没有 brew 时才会退回官方安装脚本（那一步需要 sudo）。另外 brew 不能在 root 下运行，
 所以脚本检测到你是 root 时会跳过 brew 路线。
 
-> **只有 OpenClaw 必须走 npm** —— Homebrew 里没有 `openclaw` 这个包（查过了，404），
-> 它是 npm 全局包，没别的装法。
+### OpenClaw 怎么装（它是特例）
 
-如果 npm 的全局目录不可写（官方 Node 安装包把 `/usr/local` 给了 root，直接 `npm install -g`
-会没权限），脚本有两条出路：**先用 brew 装 Node**（全局目录归你自己）；不行再改成用户级的
-`~/.npm-global`（npm 官方推荐的做法，之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
+**Homebrew 里确实有 openclaw**，但它在 **cask** 里（不是 formula，所以 `brew install openclaw`
+装的是 macOS 客户端）：
+
+```bash
+brew install --cask openclaw      # 装 /Applications/OpenClaw.app，要求 macOS 15+
+```
+
+⚠️ **cask 只装 GUI 客户端，不含命令行工具**。而工作台要连 gateway（`openclaw gateway run --port 18789`）
+必须有 CLI，所以脚本在装完客户端后还会继续装命令行，顺序是：
+
+1. 官方安装脚本 `curl -fsSL https://openclaw.ai/install.sh | bash` —— **官方主推**，
+   它会自己准备 Node 运行时，完全绕开 npm 目录权限问题
+2. 上面不行才走 npm：`npm install -g openclaw@latest --allow-scripts=openclaw`
+   （`--allow-scripts=openclaw` 是官方要求的，不加 lifecycle 脚本不跑、装出来是残缺的）
+
+走 npm 时如果全局目录不可写（官方 Node 安装包把 `/usr/local` 给了 root），脚本有两条出路：
+**先用 brew 装 Node**（全局目录归你自己）；不行再改成用户级的 `~/.npm-global`
+（npm 官方推荐的做法，之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
 
 这步通常要 **1~3 分钟**，中间屏幕可能长时间只有一条进度条 —— 那不是卡住。
 如果超过 5 分钟完全没动静，多半是连 npm 官方源慢，可以先换镜像再重跑：
