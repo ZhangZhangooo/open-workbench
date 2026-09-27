@@ -30,17 +30,21 @@
 | Windows | `powershell -ExecutionPolicy Bypass -File install.ps1` |
 | macOS / Linux | `sudo ./install.sh` |
 
-想全自动、不再逐步确认：`install.ps1 -Yes` / `sudo ./install.sh --yes`
+想全自动、不再逐步确认：`powershell -ExecutionPolicy Bypass -File install.ps1 -Yes` / `sudo ./install.sh --yes`
 
 ### macOS / Linux：怎么跑（需要 root / sudo）
 
 ```bash
 sudo ./install.sh               # 推荐：整体以 root 跑，脚本内部会把 brew/ollama 降回你本人
-chmod +x install.sh && sudo ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
+chmod +x ./install.sh && sudo ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
 ```
 
+> ⚠️ **必须带 `./`（或完整路径）**：当前目录 `.` 不在 `$PATH` 里，直接敲 `install.sh` 会报
+> `command not found: install.sh`。所以运行写 `./install.sh`（或 `/绝对路径/install.sh`），
+> `chmod` 也一样写 `./install.sh`。
+>
 > 从 Git clone 下来的 `install.sh` 已经带执行位，理论上 `sudo ./install.sh` 就能跑；
-> 如果报 `Permission denied`，补一次 `chmod +x install.sh` 即可。
+> 如果报 `Permission denied`，补一次 `chmod +x ./install.sh` 即可。
 >
 > **不是 root 也能跑**：脚本检测到当前不是 root 会自动 `sudo` 重新以 root 运行自己（保留你传的 `--yes` 等参数）；
 > 你也可以在跑之前自己先 `sudo`。
@@ -72,6 +76,22 @@ sudo -u <你> brew install node                                    # npm 全局�
 >
 > 脚本是 root，所以生成的 `config.json`、`data/`、`~/.ollama` 会先归 root，收尾时**还给你自己** ——
 > 不然之后工作台改不动配置、ollama 也写不进模型目录。
+
+### Windows：怎么跑
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+# 全自动、不再逐步确认：
+powershell -ExecutionPolicy Bypass -File install.ps1 -Yes
+```
+
+> ⚠️ **报「文件未经数字签名 / 不安全」怎么办**：从网上下载的 `.ps1` 会带一个「来自 Internet」的标记，
+> Windows / PowerShell 据此把它当成不受信任的脚本拦下来。三种解法任选其一：
+> 1. 直接用上面带 `-ExecutionPolicy Bypass` 的命令跑（这条就是为绕过签名 / 执行策略检查准备的）；
+> 2. 先清掉下载标记：在 PowerShell 里跑 `Unblock-File install.ps1`，再正常执行；
+> 3. 把 `install.ps1` **存到本机盘**（比如 D: 盘的一个文件夹）再跑 —— 本地盘不带「Internet」标记，就不会被拦。
+>
+> 公司 / 学校机器若用组策略强制了更严的执行策略，第 1 种可能仍被拦，用第 2 或第 3 种。
 
 ### OpenClaw 怎么装（它是特例）
 
