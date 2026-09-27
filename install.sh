@@ -59,6 +59,14 @@ IS_MAC=0; [[ "$(uname -s)" == "Darwin" ]] && IS_MAC=1
 HAS_BREW=0
 if has brew && [[ "$IS_ROOT" == 0 ]]; then HAS_BREW=1; fi   # brew 拒绝在 root 下运行
 
+# macOS 上默认给安装命令统一加 sudo（省得一步步卡权限）。
+# 例外：brew —— 它会直接拒绝以 root 运行（"Running Homebrew as root is extremely dangerous"），
+#       加了 sudo 反而必失败；而 brew 本来也不需要提权。
+SX=""
+if [[ "$IS_MAC" == 1 && "$IS_ROOT" == 0 && -n "$SUDO" ]]; then SX="sudo "; fi
+# sudo 之后文件的属主会变成 root，收尾时要还给你自己
+REAL_USER="${SUDO_USER:-$(id -un 2>/dev/null || echo "$USER")}"
+
 printf "${B}OpenWorkbench 环境配置${N}  (macOS / Linux)\n"
 
 if [[ "$IS_ROOT" == 1 ]]; then
@@ -66,6 +74,10 @@ if [[ "$IS_ROOT" == 1 ]]; then
   printf "        建议退出 root 后重跑（脚本会在需要时自己 sudo）。\n"
 elif [[ -z "$SUDO" ]]; then
   warn "没找到 sudo：需要装 Ollama / 系统包时，脚本会打印命令请你手动执行。"
+elif [[ -n "$SX" ]]; then
+  printf "  ${B}macOS：下面的安装命令统一加 sudo${N}（brew 除外，它拒绝 root 运行）\n"
+  printf "  先验证一次密码，之后就不用反复输了：\n"
+  $SUDO -v || warn "sudo 认证没通过，后面几步可能会失败"
 fi
 
 # ---------- 1 Python ----------
@@ -141,7 +153,7 @@ fi
 say "3/5  拉模型（这两个是云端模型，只有几百字节的代理壳，不下权重）"
 for m in "$CHAT_MODEL" "$VISION_MODEL"; do
   if ollama list 2>/dev/null | tr -d '\r' | grep -q "^${m}"; then ok "已有 $m"
-  else run "ollama pull $m"; fi
+  else run "${SX}ollama pull $m"; fi
 done
 
 # ---------- 4 OpenClaw ----------
@@ -161,7 +173,9 @@ else
   # 路线 2：官方安装脚本（自带 Node 运行时，彻底绕开 npm 目录权限问题）
   if ! has openclaw; then
     warn "装命令行版：官方脚本会${B}自己准备 Node 运行时${N}，不用你管 npm 权限"
-    run "curl -fsSL https://openclaw.ai/install.sh | bash"
+    # 管道要整体包一层提权，否则只有 curl 是 root、bash 不是
+    if [[ -n "$SX" ]]; then run "${SX}bash -c 'curl -fsSL https://openclaw.ai/install.sh | bash'"
+    else run "curl -fsSL https://openclaw.ai/install.sh | bash"; fi
     export PATH="$HOME/.local/bin:$HOME/.openclaw/bin:/usr/local/bin:$PATH"; hash -r 2>/dev/null || true
   fi
 
@@ -212,9 +226,10 @@ else
       #   一片空白 —— 这就是"看着像卡住"的元凶之一，放到前台才看得到进度。
       # --no-fund --no-audit：省掉两次联网请求，装得更快。
       warn "这一步通常 1~3 分钟，npm 会显示进度条 —— 没崩就是在装，别急"
-      if [[ -w "$NPM_PREFIX" ]]; then
-        run "npm install -g openclaw@latest --allow-scripts=openclaw --no-fund --no-audit --foreground-scripts"
-      elif [[ -n "$SUDO" ]]; then
+    if [[ -w "$NPM_PREFIX" ]]; then
+      # mac 上统一走 sudo；--unsafe-perm 是 sudo 下装 npm 包的常规做法
+      run "${SX}npm install -g openclaw@latest --allow-scripts=openclaw --no-fund --no-audit --foreground-scripts --unsafe-perm"
+    elif [[ -n "$SUDO" ]]; then
         warn "要装到 $NPM_PREFIX（需要管理员权限）：会先要一次开机密码，"
         printf "    ${B}输密码时屏幕不显示字符，这是正常的${N}，输完回车即可。\n"
         $SUDO -v || warn "sudo 认证没通过，下面这步可能失败"
@@ -286,6 +301,19 @@ json.dump(cfg, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 # 用 ASCII 输出，避免不同终端编码导致的乱码
 print("  [ok] config.json ready  ai=%s  ocr=%s" % (ai.get("model"), cfg["ocr"].get("model")))
 PYEOF
+
+# sudo 跑出来的文件属主是 root，还给你自己 —— 不然之后工作台改不动 config.json、
+# ollama 也写不进模型目录（这两个是最容易事后才发现的坑）
+if [[ -n "$SX" ]]; then
+  say "收尾：把 sudo 生成的文件归属还给你自己"
+  REAL_HOME="$(eval echo "~$REAL_USER" 2>/dev/null || echo "$HOME")"
+  if [[ -f config.json ]]; then
+    chown "$REAL_USER" config.json 2>/dev/null && ok "config.json -> $REAL_USER" || true
+  fi
+  if [[ -d data ]]; then chown -R "$REAL_USER" data 2>/dev/null || true; fi
+  if [[ -d "$REAL_HOME/.ollama" ]]; then chown -R "$REAL_USER" "$REAL_HOME/.ollama" 2>/dev/null || true; fi
+  ok "已归还给 $REAL_USER"
+fi
 
 say "完成"
 printf "  启动：  ${B}%s server.py 8777${N}\n" "$PY"

@@ -64,8 +64,17 @@ brew install ollama && brew services start ollama   # 后者会注册成开机�
 brew install node                                    # npm 全局目录落在 brew 下，归你自己
 ```
 
-没有 brew 时才会退回官方安装脚本（那一步需要 sudo）。另外 brew 不能在 root 下运行，
+没有 brew 时才会退回官方安装脚本。另外 brew 不能在 root 下运行，
 所以脚本检测到你是 root 时会跳过 brew 路线。
+
+> **mac 上的安装命令统一加 `sudo`**（`ollama pull`、`npm install -g`、官方安装脚本都带），
+> 免去一步步卡权限。开头会先验证一次密码，之后不再反复问。
+> **唯一例外是 `brew`** —— 它会直接拒绝以 root 运行
+> （`Running Homebrew as root is extremely dangerous`），加了 `sudo` 反而必失败，
+> 而 brew 本来就不需要提权。同理，`ollama launch openclaw` 也不加 sudo（以 root 启动 GUI 会留下一堆 root 属主的配置）。
+>
+> 因为中途用了 sudo，脚本收尾会把 `config.json`、`data/`、`~/.ollama` 的归属**还给你自己** ——
+> 不然之后工作台改不动配置、ollama 也写不进模型目录。
 
 ### OpenClaw 怎么装（它是特例）
 
