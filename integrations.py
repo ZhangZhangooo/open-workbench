@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -15,8 +16,28 @@ NODE = r"C:\Program Files\nodejs\node.exe"
 
 
 def _openclaw_mjs() -> str:
+    """定位 openclaw 的 .mjs 入口（Windows npm 装法：node + openclaw.mjs）。
+
+    不同机器 npm 前缀不一样：默认 %APPDATA%\\npm、自定义 ~/.npm-global、
+    brew 的 /usr/local|/opt/homebrew。挨个试，找到即返回；都找不到返回默认 Windows 路径兜底。
+    """
+    home = os.path.expanduser("~")
     appdata = os.environ.get("APPDATA", "")
-    return os.path.join(appdata, "npm", "node_modules", "openclaw", "openclaw.mjs")
+    candidates = []
+    if appdata:
+        candidates.append(os.path.join(appdata, "npm", "node_modules", "openclaw", "openclaw.mjs"))
+    candidates += [
+        os.path.join(home, ".npm-global", "lib", "node_modules", "openclaw", "openclaw.mjs"),
+        "/usr/local/lib/node_modules/openclaw/openclaw.mjs",
+        "/opt/homebrew/lib/node_modules/openclaw/openclaw.mjs",
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    # 兜底：原 Windows 默认路径（即便不存在也返回，保持旧行为）
+    if appdata:
+        return os.path.join(appdata, "npm", "node_modules", "openclaw", "openclaw.mjs")
+    return "/npm/node_modules/openclaw/openclaw.mjs"
 
 
 _wps_cache: dict[str, str | None] = {}
@@ -158,6 +179,7 @@ def _exec(cmd: list[str], timeout: int) -> dict:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
             encoding="utf-8", errors="replace",
+            shell=_needs_shell(cmd),
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": f"超过 {timeout} 秒没跑完", "raw": "", "code": -1}
@@ -206,11 +228,61 @@ def _exec(cmd: list[str], timeout: int) -> dict:
     }
 
 
-def _openclaw_base() -> list[str]:
+def _openclaw_bin_candidates() -> list[str]:
+    """常见安装位置里的 openclaw CLI 可执行文件（绝对路径），覆盖多种装法。"""
+    home = os.path.expanduser("~")
+    cands = [
+        os.path.join(home, ".local", "bin", "openclaw"),        # 官方安装脚本（mac/linux）
+        os.path.join(home, ".openclaw", "bin", "openclaw"),      # 官方脚本另一落点
+        os.path.join(home, ".npm-global", "bin", "openclaw"),    # npm 自定义前缀
+        "/opt/homebrew/bin/openclaw",                            # Homebrew（Apple Silicon）
+        "/usr/local/bin/openclaw",                               # 系统 / Homebrew（Intel）
+        "/usr/bin/openclaw",
+    ]
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        cands.append(os.path.join(appdata, "npm", "openclaw.cmd"))   # Windows npm 全局
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    if localappdata:
+        cands.append(os.path.join(localappdata, "openclaw", "openclaw.cmd"))
+    return cands
+
+
+def resolve_node() -> bool:
+    """node 是否可用：先看 PATH，再看写死的 Windows 默认路径。"""
+    return shutil.which("node") is not None or os.path.isfile(NODE)
+
+
+def resolve_openclaw_cmd() -> list[str] | None:
+    """返回能实际跑 openclaw 的命令列表；找不到返回 None。
+
+    优先级：
+      ① PATH 上的 openclaw（最通用：官方脚本 / brew / npm 全局都靠它）
+      ② 上面列的常见安装目录里的绝对路径（不依赖 server 进程的 PATH）
+      ③ Windows npm 装法：node + openclaw.mjs
+    /api/claw/info 的「已就位」和真正跑任务都用同一个判定，避免一个说有、一个说没有。
+    """
+    w = shutil.which("openclaw")
+    if w:
+        return [w]
+    for c in _openclaw_bin_candidates():
+        if os.path.isfile(c):
+            return [c]
+    node = shutil.which("node") or (NODE if os.path.isfile(NODE) else None)
     mjs = _openclaw_mjs()
-    if os.path.isfile(NODE) and os.path.isfile(mjs):
-        return [NODE, mjs]
-    return ["openclaw"]
+    if node and os.path.isfile(mjs):
+        return [node, mjs]
+    return None
+
+
+def _needs_shell(cmd: list[str]) -> bool:
+    """Windows 上 npm 装的是 openclaw.cmd/.ps1 这类 shim，直接当可执行跑会 FileNotFound，
+    需要走 cmd.exe / powershell。unix 上不会出现这些后缀，保持 shell=False。"""
+    return bool(cmd) and cmd[0].lower().endswith((".cmd", ".bat", ".ps1"))
+
+
+def _openclaw_base() -> list[str]:
+    return resolve_openclaw_cmd() or ["openclaw"]
 
 
 _claw_cache: dict[str, tuple[float, dict]] = {}
@@ -230,7 +302,8 @@ def openclaw_cmd(args: list[str], timeout: int = 60, cache_ttl: int = 0) -> dict
 
     try:
         p = subprocess.run(_openclaw_base() + args, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8", errors="replace")
+                           timeout=timeout, encoding="utf-8", errors="replace",
+                           shell=_needs_shell(_openclaw_base() + args))
         raw = (p.stdout or "").strip()
         err = (p.stderr or "").strip()
     except subprocess.TimeoutExpired:
@@ -409,7 +482,7 @@ def _frontmatter(text: str) -> tuple[str, str]:
 def openclaw_health() -> dict:
     """健康检查：不跑 doctor（它会改东西），只做本地只读判定。"""
     import socket
-    mjs = _openclaw_mjs()
+    cmd = resolve_openclaw_cmd()
     ver = openclaw_cmd(["--version"], timeout=30, cache_ttl=600)
     gw = False
     try:
@@ -419,9 +492,9 @@ def openclaw_health() -> dict:
         gw = False
     return {
         "ok": True,
-        "cli_exists": os.path.isfile(mjs),
-        "cli_path": mjs,
-        "node": os.path.isfile(NODE),
+        "cli_exists": cmd is not None,
+        "cli_path": cmd[0] if cmd else "",
+        "node": resolve_node(),
         "version": (ver.get("raw") or "").strip()[:80],
         "gateway_port": 18789,
         "gateway_up": gw,

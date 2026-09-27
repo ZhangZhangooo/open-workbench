@@ -832,11 +832,11 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == "/api/claw/info":
-            mjs = integrations._openclaw_mjs()
+            cmd = integrations.resolve_openclaw_cmd()
             self._json({
-                "exists": os.path.isfile(mjs),
-                "path": mjs,
-                "node": os.path.isfile(integrations.NODE),
+                "exists": cmd is not None,
+                "path": cmd[0] if cmd else "",
+                "node": integrations.resolve_node(),
             })
             return
 
