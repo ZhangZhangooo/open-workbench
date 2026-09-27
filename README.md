@@ -28,52 +28,49 @@
 | 系统 | 命令（在项目目录下执行） |
 | --- | --- |
 | Windows | `powershell -ExecutionPolicy Bypass -File install.ps1` |
-| macOS / Linux | `bash install.sh` |
+| macOS / Linux | `sudo ./install.sh` |
 
-想全自动、不再逐步确认：`install.ps1 -Yes` / `install.sh --yes`
+想全自动、不再逐步确认：`install.ps1 -Yes` / `sudo ./install.sh --yes`
 
-### macOS / Linux：怎么跑、要不要 sudo
+### macOS / Linux：怎么跑（需要 root / sudo）
 
 ```bash
-bash install.sh               # 最省事，不需要 chmod
-chmod +x install.sh && ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
+sudo ./install.sh               # 推荐：整体以 root 跑，脚本内部会把 brew/ollama 降回你本人
+chmod +x install.sh && sudo ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
 ```
 
-> 从 Git clone 下来的 `install.sh` 已经带执行位，理论上 `./install.sh` 就能跑；
+> 从 Git clone 下来的 `install.sh` 已经带执行位，理论上 `sudo ./install.sh` 就能跑；
 > 如果报 `Permission denied`，补一次 `chmod +x install.sh` 即可。
-
-**⚠️ 别给整个脚本加 sudo：**
-
-```bash
-sudo bash install.sh    # 别这样
-```
-
-整体提权有两个副作用：模型会被下载到 **root 的家目录**（之后你自己跑 `ollama list` 反而看不到），
-`config.json` 也会归 root 所有、你的工作台进程改不动它。
-
-脚本的正确姿势是：**以普通用户运行，只在真正需要管理员权限的那一步（把 Ollama 装进 `/usr/local`）单独 `sudo`**，
-而且默认会先把命令打出来等你按回车。没装 `sudo` 或以 root 登录时，脚本会检测到并把该手动执行的命令打印给你。
-
-### mac 上默认走 Homebrew（免 sudo）
-
-检测到装了 Homebrew 时，脚本会这样装 —— brew 的目录（`Apple Silicon` 上是 `/opt/homebrew`）归你
-自己的用户，所以**全程不需要 sudo**：
-
-```bash
-brew install ollama && brew services start ollama   # 后者会注册成开机自启
-brew install node                                    # npm 全局目录落在 brew 下，归你自己
-```
-
-没有 brew 时才会退回官方安装脚本。另外 brew 不能在 root 下运行，
-所以脚本检测到你是 root 时会跳过 brew 路线。
-
-> **mac 上的安装命令统一加 `sudo`**（`ollama pull`、`npm install -g`、官方安装脚本都带），
-> 免去一步步卡权限。开头会先验证一次密码，之后不再反复问。
-> **唯一例外是 `brew`** —— 它会直接拒绝以 root 运行
-> （`Running Homebrew as root is extremely dangerous`），加了 `sudo` 反而必失败，
-> 而 brew 本来就不需要提权。同理，`ollama launch openclaw` 也不加 sudo（以 root 启动 GUI 会留下一堆 root 属主的配置）。
 >
-> 因为中途用了 sudo，脚本收尾会把 `config.json`、`data/`、`~/.ollama` 的归属**还给你自己** ——
+> **不是 root 也能跑**：脚本检测到当前不是 root 会自动 `sudo` 重新以 root 运行自己（保留你传的 `--yes` 等参数）；
+> 你也可以在跑之前自己先 `sudo`。
+
+**为什么是整个脚本 sudo、而不是只在某几步 sudo：** mac 上装 Ollama / Node / OpenClaw 几乎每步都要权限，
+整体 sudo 一次最省事。但 `brew` 与 `ollama` 必须降回你本人执行：
+
+- **brew 直接拒绝以 root 运行**（`Running Homebrew as root is extremely dangerous`），所以脚本用 `sudo -u <你> brew …` 代你跑；
+- **ollama 的模型要落在你自己的家目录**，以 root 跑 `ollama pull` 会下进 `/root/.ollama`，你日常跑的 ollama 反而看不到、也写不进。
+
+脚本的正确姿势是：**以 root 运行整个脚本，brew / ollama / openclaw / npm 全部以你的身份执行；只有 `apt`、官方 Ollama 安装脚本写 `/usr/local`、以及收尾 chown 才用 root**，
+而且默认会先把每条命令打出来等你按回车。没装 `sudo` 时脚本会要求你以 root 重跑。
+
+### mac 上默认走 Homebrew（脚本内部以你的身份跑）
+
+检测到装了 Homebrew 时，脚本会这样装 —— 它用 `sudo -u <你>` 代你执行，brew 的目录（`Apple Silicon` 上是 `/opt/homebrew`）归你
+自己的用户，所以 brew 这块全程不会用 root：
+
+```bash
+sudo -u <你> brew install ollama && sudo -u <你> brew services start ollama   # 后者会注册成开机自启
+sudo -u <你> brew install node                                    # npm 全局目录落在 brew 下，归你自己
+```
+
+没有 brew 时才会退回官方安装脚本（以 root 写 `/usr/local`）。
+
+> **整个脚本以 root 运行时，brew / ollama / npm 的安装命令都「以你的身份」执行**（`ollama pull`、`npm install -g`、官方安装脚本都是），
+> 免去你一步步卡权限，也保证模型和 CLI 都落在你的家目录。
+> 同理，`ollama launch openclaw` 也以你的身份跑（以 root 启动 GUI 会留下一堆 root 属主、且你自己的 ollama 看不到）。
+>
+> 脚本是 root，所以生成的 `config.json`、`data/`、`~/.ollama` 会先归 root，收尾时**还给你自己** ——
 > 不然之后工作台改不动配置、ollama 也写不进模型目录。
 
 ### OpenClaw 怎么装（它是特例）
