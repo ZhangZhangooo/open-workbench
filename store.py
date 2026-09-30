@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -116,6 +117,23 @@ CREATE TABLE IF NOT EXISTS milestones (
     sort INTEGER DEFAULT 0,
     created REAL
 );
+-- 87 全文检索：自建倒排索引
+-- 不用 FTS5 的默认分词器 —— 它把一整串中文当成一个 token（unicode61），
+-- 「怎么备份」搜不到「备份」；trigram 又要至少 3 个字。所以自己做
+-- 「ASCII 词 + 中文单字 + 中文二元组」的倒排，2 个字的中文词也能命中。
+CREATE TABLE IF NOT EXISTS kb_index (
+    kb_id INTEGER,
+    term TEXT
+);
+CREATE INDEX IF NOT EXISTS kb_index_term ON kb_index(term);
+-- 88 双链：[[标题]] 解析出来的有向边（存标题，另存解析到的 id 便于反查）
+CREATE TABLE IF NOT EXISTS kb_links (
+    src_id INTEGER,
+    dst_title TEXT,
+    dst_id INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS kb_links_src ON kb_links(src_id);
+CREATE INDEX IF NOT EXISTS kb_links_dst ON kb_links(dst_id);
 CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT
@@ -322,6 +340,11 @@ ALTERS = [
     "ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''",
     "ALTER TABLE projects ADD COLUMN kind TEXT DEFAULT ''",
     "ALTER TABLE projects ADD COLUMN created REAL",
+    # J 域：资料 / 知识库（87-94）
+    "ALTER TABLE kb ADD COLUMN status TEXT DEFAULT '待读'",
+    "ALTER TABLE kb ADD COLUMN fav INTEGER DEFAULT 0",
+    "ALTER TABLE kb ADD COLUMN summary TEXT DEFAULT ''",
+    "ALTER TABLE kb ADD COLUMN read_at REAL",
 ]
 
 PROMPT_SCHEMA = """
@@ -405,6 +428,58 @@ PROJECT_TEMPLATES = [
 
 def project_templates() -> list[dict]:
     return PROJECT_TEMPLATES
+
+
+# ---- 87 全文检索：自己做分词，中文按「单字 + 二元组」切 ----
+
+_KB_ASCII = re.compile(r"[0-9a-z_]+")
+_KB_CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+_KB_LINK = re.compile(r"\[\[([^\[\]\n]{1,80})\]\]")
+KB_STATUS = ("待读", "在读", "已读")
+
+
+def kb_terms(text: str) -> set[str]:
+    """把一段文字切成可检索的词：ASCII 词（>=2 字符）+ 中文单字 + 中文二元组。"""
+    t = (text or "").lower()
+    out: set[str] = set()
+    for m in _KB_ASCII.finditer(t):
+        w = m.group(0)
+        if len(w) >= 2:
+            out.add(w)
+    for m in _KB_CJK.finditer(t):
+        s = m.group(0)
+        for ch in s:
+            out.add(ch)
+        for i in range(len(s) - 1):
+            out.add(s[i:i + 2])
+    return out
+
+
+def kb_extract_links(body: str) -> list[str]:
+    """88 双链：抽出正文里所有 [[标题]]，去重保序。"""
+    seen, out = set(), []
+    for m in _KB_LINK.finditer(body or ""):
+        t = m.group(1).strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def kb_snippet(body: str, terms: set[str], width: int = 70) -> str:
+    """搜到哪就从哪截一段，让结果里能看出为什么命中。"""
+    b = (body or "").replace("\n", " ")
+    low = b.lower()
+    best = -1
+    for t in terms:
+        p = low.find(t)
+        if p >= 0 and (best < 0 or p < best):
+            best = p
+    if best < 0:
+        return b[:width * 2] + ("…" if len(b) > width * 2 else "")
+    a = max(0, best - width)
+    z = min(len(b), best + width)
+    return ("…" if a > 0 else "") + b[a:z] + ("…" if z < len(b) else "")
 
 
 def expand_event(ev: dict, a: str, b: str) -> list[str]:
@@ -1195,35 +1270,274 @@ class Store:
 
     # ---- 本地知识库 ----
 
-    def kb_list(self) -> list[dict]:
-        return self._run("SELECT * FROM kb ORDER BY updated DESC")
+    def kb_list(self, status: str = "", fav: int = -1) -> list[dict]:
+        sql = "SELECT * FROM kb WHERE 1=1"
+        args = []
+        if status:
+            sql += " AND COALESCE(status,'待读')=?"
+            args.append(status)
+        if fav in (0, 1):
+            sql += " AND COALESCE(fav,0)=?"
+            args.append(fav)
+        sql += " ORDER BY updated DESC"
+        return self._run(sql, tuple(args))
 
     def kb_get(self, id_: int) -> dict:
         rows = self._run("SELECT * FROM kb WHERE id=?", (id_,))
         return rows[0] if rows else {}
 
+    def _kb_apply_links(self, kb_id: int, body: str) -> int:
+        """88 把正文里的 [[标题]] 落成边；能对上已有标题的就顺手解析出 id。"""
+        self._run("DELETE FROM kb_links WHERE src_id=?", (int(kb_id),), False)
+        n = 0
+        for title in kb_extract_links(body):
+            rows = self._run("SELECT id FROM kb WHERE title=? ORDER BY id LIMIT 1", (title,))
+            dst = int(rows[0]["id"]) if rows else 0
+            self._run("INSERT INTO kb_links (src_id, dst_title, dst_id) VALUES (?,?,?)",
+                      (int(kb_id), title, dst), False)
+            n += 1
+        return n
+
+    def kb_reindex(self, kb_id: int, title: str, body: str, tags: str) -> int:
+        """87 重建这一条的倒排索引。"""
+        self._run("DELETE FROM kb_index WHERE kb_id=?", (int(kb_id),), False)
+        # 标题权重更高：出现两次（简单加权）
+        terms = kb_terms(title + "\n" + title + "\n" + (body or "") + "\n" + (tags or ""))
+        if not terms:
+            return 0
+        self._run_many("INSERT INTO kb_index (kb_id, term) VALUES (?,?)",
+                       [(int(kb_id), t) for t in terms])
+        return len(terms)
+
+    def _run_many(self, sql: str, seq):
+        with self._lock:
+            self.conn.executemany(sql, seq)
+            self.conn.commit()
+        return True
+
+    def _kb_resolve_links(self, title: str, kb_id: int) -> int:
+        """新条目落库后，把别人指向它的 [[标题]] 补上 dst_id。"""
+        self._run("UPDATE kb_links SET dst_id=? WHERE dst_title=? AND COALESCE(dst_id,0)=0",
+                  (int(kb_id), title), False)
+        rows = self._run("SELECT COUNT(*) c FROM kb_links WHERE dst_title=?", (title,))
+        return int(rows[0]["c"]) if rows else 0
+
     def kb_save(self, id_: int | None, title: str, body: str, tags: str,
-                source: str = "manual", source_path: str = "") -> dict:
+                source: str = "manual", source_path: str = "",
+                status: str = "", fav: int | None = None) -> dict:
         if not title and not body:
             return {"ok": False, "error": "标题和正文不能都为空"}
         now = time.time()
+        st = status if status in KB_STATUS else ""
         if id_:
+            old = self.kb_get(int(id_))
             self._run(
-                "UPDATE kb SET title=?, body=?, tags=?, source=?, source_path=?, updated=? WHERE id=?",
-                (title, body, tags, source, source_path, now, id_), False,
+                "UPDATE kb SET title=?, body=?, tags=?, source=?, source_path=?, updated=?, "
+                "status=COALESCE(NULLIF(?,''), status), fav=COALESCE(?, fav) WHERE id=?",
+                (title, body, tags, source, source_path, now, st,
+                 None if fav is None else int(fav), int(id_)), False,
             )
+            # 改了标题/正文就重建索引与链接
+            if (old.get("title") or "") != title or (old.get("body") or "") != body \
+                    or (old.get("tags") or "") != tags:
+                self.kb_reindex(int(id_), title, body, tags)
+                self._kb_apply_links(int(id_), body)
+            # 改了标题：别人按旧标题链进来的边，dst_id 要清掉（旧标题已不存在）
+            old_title = old.get("title") or ""
+            if old_title and old_title != title:
+                self._run("UPDATE kb_links SET dst_id=0 WHERE dst_title=? AND dst_id=?",
+                          (old_title, int(id_)), False)
+            self._kb_resolve_links(title, int(id_))
             return {"ok": True, "id": id_}
         cur = self.conn.execute(
-            "INSERT INTO kb (title, body, tags, source, source_path, created, updated) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (title, body, tags, source, source_path, now, now),
+            "INSERT INTO kb (title, body, tags, source, source_path, status, fav, summary, "
+            "created, updated) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (title, body, tags, source, source_path, st or "待读",
+             0 if fav is None else int(fav), "", now, now),
         )
         self.conn.commit()
-        return {"ok": True, "id": cur.lastrowid}
+        kid = cur.lastrowid
+        self.kb_reindex(kid, title, body, tags)
+        self._kb_apply_links(kid, body)
+        self._kb_resolve_links(title, kid)
+        return {"ok": True, "id": kid}
 
     def kb_del(self, id_: int) -> dict:
-        self._run("DELETE FROM kb WHERE id=?", (id_,), False)
+        self._run("DELETE FROM kb WHERE id=?", (int(id_),), False)
+        self._run("DELETE FROM kb_index WHERE kb_id=?", (int(id_),), False)
+        self._run("DELETE FROM kb_links WHERE src_id=?", (int(id_),), False)
+        self._run("UPDATE kb_links SET dst_id=0 WHERE dst_id=?", (int(id_),), False)
         return {"ok": True}
+
+    # ---- 87 搜索 ----
+
+    def kb_search(self, q: str, limit: int = 40) -> dict:
+        """倒排 AND 检索：所有词都命中的条目才算，按命中词数排序。"""
+        terms = kb_terms(q)
+        if not terms:
+            return {"ok": True, "rows": [], "q": q, "n_terms": 0}
+        tl = sorted(terms)[:64]          # 词太多时截断，防止 SQL 参数爆炸
+        ph = ",".join("?" for _ in tl)
+        sql = (f"SELECT kb_id, COUNT(*) c FROM kb_index WHERE term IN ({ph}) "
+               "GROUP BY kb_id HAVING c=?" )
+        rows = self._run(sql, tuple(tl) + (len(tl),))
+        if not rows:
+            return {"ok": True, "rows": [], "q": q, "n_terms": len(tl)}
+        score = {int(r["kb_id"]): int(r["c"]) for r in rows}
+        ids = list(score.keys())
+        if not ids:
+            return {"ok": True, "rows": [], "q": q, "n_terms": len(tl)}
+        ph2 = ",".join("?" for _ in ids)
+        got = self._run(f"SELECT * FROM kb WHERE id IN ({ph2})", tuple(ids))
+        for g in got:
+            g["score"] = score.get(int(g["id"]), 0)
+            g["snippet"] = kb_snippet(g.get("body") or "", terms)
+        got.sort(key=lambda g: (-g["score"], -(g.get("updated") or 0)))
+        return {"ok": True, "rows": got[:limit], "q": q, "n_terms": len(tl),
+                "total": len(got), "index_size": self._kb_index_size()}
+
+    def _kb_index_size(self) -> int:
+        rows = self._run("SELECT COUNT(*) c FROM kb_index")
+        return int(rows[0]["c"]) if rows else 0
+
+    def kb_reindex_all(self) -> dict:
+        """把库里已有的资料全部重建索引（老数据没索引时用）。"""
+        rows = self._run("SELECT id, title, body, tags FROM kb")
+        for r in rows:
+            self.kb_reindex(int(r["id"]), r.get("title") or "", r.get("body") or "",
+                            r.get("tags") or "")
+            self._kb_apply_links(int(r["id"]), r.get("body") or "")
+            self._kb_resolve_links(r.get("title") or "", int(r["id"]))
+        return {"ok": True, "n": len(rows), "index_size": self._kb_index_size()}
+
+    # ---- 88 双链 ----
+
+    def kb_backlinks(self, id_: int) -> list[dict]:
+        """谁链到了我（按 id 或标题都对得上）。"""
+        row = self.kb_get(int(id_))
+        title = row.get("title") or ""
+        return self._run(
+            "SELECT l.src_id AS id, k.title, k.updated FROM kb_links l "
+            "JOIN kb k ON k.id=l.src_id "
+            "WHERE l.src_id<>? AND (l.dst_id=? OR (COALESCE(l.dst_id,0)=0 AND l.dst_title=?)) "
+            "ORDER BY k.updated DESC", (int(id_), int(id_), title))
+
+    def kb_outlinks(self, id_: int) -> list[dict]:
+        """我链到了谁。目标改名后这里要如实报「不存在」，不能拿旧 id 硬顶。"""
+        rows = self._run("SELECT * FROM kb_links WHERE src_id=? ORDER BY dst_title",
+                         (int(id_),))
+        out = []
+        for l in rows:
+            t = self.kb_get(int(l["dst_id"])) if l.get("dst_id") else {}
+            alive = bool(t) and (t.get("title") or "") == (l.get("dst_title") or "")
+            out.append({"title": l.get("dst_title"), "id": (l.get("dst_id") or 0) if alive else 0,
+                        "exists": alive, "updated": t.get("updated") if alive else None})
+        return out
+
+    def kb_link_graph(self) -> dict:
+        """全库双链图：节点 + 边，给前端画个简图/列表。"""
+        nodes = self._run("SELECT id, title, tags FROM kb ORDER BY id")
+        edges = self._run("SELECT src_id, dst_id, dst_title FROM kb_links")
+        return {"ok": True, "nodes": nodes, "edges": edges,
+                "dangling": sorted({e["dst_title"] for e in edges if not e.get("dst_id")})}
+
+    # ---- 89 阅读队列 ----
+
+    def kb_status(self, id_: int, status: str) -> dict:
+        if status not in KB_STATUS:
+            return {"ok": False, "error": "状态只能是 " + "/".join(KB_STATUS)}
+        read_at = time.time() if status == "已读" else None
+        self._run("UPDATE kb SET status=?, read_at=COALESCE(?, read_at), updated=? WHERE id=?",
+                  (status, read_at, time.time(), int(id_)), False)
+        return {"ok": True, "status": status}
+
+    def kb_queue(self) -> dict:
+        rows = self._run("SELECT COALESCE(status,'待读') s, COUNT(*) c FROM kb GROUP BY s")
+        cnt = {r["s"]: int(r["c"]) for r in rows}
+        return {"ok": True, "待读": cnt.get("待读", 0), "在读": cnt.get("在读", 0),
+                "已读": cnt.get("已读", 0), "total": sum(cnt.values())}
+
+    # ---- 90 AI 摘要卡 ----
+
+    def kb_set_summary(self, id_: int, summary: str) -> dict:
+        self._run("UPDATE kb SET summary=?, updated=? WHERE id=?",
+                  (summary or "", time.time(), int(id_)), False)
+        return {"ok": True}
+
+    # ---- 91 标签批量 ----
+
+    def kb_tags_bulk(self, ids: list[int], op: str, tag: str = "") -> dict:
+        """多选改标签：add 追加 / remove 去掉 / replace 整体换成 tag。"""
+        tag = (tag or "").strip()
+        n = 0
+        for i in ids or []:
+            row = self.kb_get(int(i))
+            if not row:
+                continue
+            cur = [t.strip() for t in (row.get("tags") or "").split(",") if t.strip()]
+            if op == "replace":
+                new = [tag] if tag else []
+            elif op == "remove":
+                new = [t for t in cur if t != tag]
+            else:                                   # add
+                new = cur + ([tag] if tag and tag not in cur else [])
+            txt = ",".join(new)
+            self._run("UPDATE kb SET tags=?, updated=? WHERE id=?",
+                      (txt, time.time(), int(i)), False)
+            self.kb_reindex(int(i), row.get("title") or "", row.get("body") or "", txt)
+            n += 1
+        return {"ok": True, "n": n}
+
+    # ---- 92 相关推荐 ----
+
+    def kb_related(self, id_: int, limit: int = 5) -> list[dict]:
+        """同标签最近的几篇（按共有标签数排序），没有标签就按命中词兜底。"""
+        me = self.kb_get(int(id_))
+        tags = {t.strip() for t in (me.get("tags") or "").split(",") if t.strip()}
+        others = [r for r in self._run("SELECT * FROM kb WHERE id<>?", (int(id_),))
+                  if r.get("id") != int(id_)]
+        scored = []
+        for r in others:
+            ot = {t.strip() for t in (r.get("tags") or "").split(",") if t.strip()}
+            common = len(tags & ot)
+            # 标题/正文的词重叠也算一点分
+            ov = len(kb_terms((me.get("title") or "") + (me.get("body") or "")[:400])
+                     & kb_terms((r.get("title") or "") + (r.get("body") or "")[:400]))
+            scored.append((common * 10 + min(ov, 20), r))
+        scored.sort(key=lambda x: (-x[0], -(x[1].get("updated") or 0)))
+        return [r for s, r in scored if s > 0][:limit]
+
+    # ---- 93 整库导出 ----
+
+    def kb_export(self) -> list[dict]:
+        """整库导出：每条资料一条，带标题/标签/状态/正文，交给上层打成 zip 或 md。"""
+        rows = self._run("SELECT * FROM kb ORDER BY updated DESC")
+        out = []
+        for r in rows:
+            out.append({
+                "name": self._safe_name(r.get("title") or ("kb-%s" % r.get("id"))),
+                "md": "# %s\n\n- 标签：%s\n- 状态：%s\n- 来源：%s%s\n- 更新：%s\n\n%s\n" % (
+                    r.get("title") or "(无标题)",
+                    r.get("tags") or "—",
+                    r.get("status") or "待读",
+                    r.get("source") or "manual",
+                    (" " + (r.get("source_path") or "")) if r.get("source_path") else "",
+                    datetime.datetime.fromtimestamp(r.get("updated") or 0).strftime("%Y-%m-%d %H:%M"),
+                    r.get("body") or ""),
+            })
+        return out
+
+    @staticmethod
+    def _safe_name(s: str) -> str:
+        bad = '\\/:*?"<>|\r\n\t'
+        t = "".join("_" if c in bad else c for c in (s or "")).strip().strip(".")
+        return (t or "kb")[:60]
+
+    # ---- 94 收藏集 ----
+
+    def kb_fav(self, id_: int, on: int = 1) -> dict:
+        self._run("UPDATE kb SET fav=? WHERE id=?", (1 if on else 0, int(id_)), False)
+        return {"ok": True, "fav": 1 if on else 0}
 
     # ---- OpenClaw 运行记录（统一活动，区别于 claw 标签的 localStorage 历史）----
 

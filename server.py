@@ -985,6 +985,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _bytes(self, data: bytes, ctype: str = "application/octet-stream",
+               filename: str = ""):
+        """二进制响应（zip 打包导出用）。"""
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header(
+                "Content-Disposition",
+                "attachment; filename*=UTF-8''" + quote(filename, safe=""))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
@@ -1739,7 +1753,67 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == "/api/kb":
-            self._json({"rows": STORE.kb_list()})
+            qq = parse_qs(u.query)
+            self._json({"rows": STORE.kb_list(
+                (qq.get("status", [""])[0] or "").strip(),
+                int(qq.get("fav", ["-1"])[0] or -1))})
+            return
+
+        # ---- J 域资料 / 知识库（87-94）----
+
+        if p == "/api/kb/get":                        # 详情：正文 + 双链 + 相关
+            qq = parse_qs(u.query)
+            kid = int(qq.get("id", ["0"])[0] or 0)
+            row = STORE.kb_get(kid)
+            if not row:
+                self._json({"ok": False, "error": "找不到这条资料"}, 404)
+                return
+            self._json({"ok": True, "row": row,
+                        "backlinks": STORE.kb_backlinks(kid),
+                        "outlinks": STORE.kb_outlinks(kid),
+                        "related": STORE.kb_related(kid, 5)})
+            return
+
+        if p == "/api/kb/search":                     # 87 全文检索
+            qq = parse_qs(u.query)
+            self._json(STORE.kb_search(
+                (qq.get("q", [""])[0] or "").strip(),
+                int(qq.get("limit", ["40"])[0] or 40)))
+            return
+
+        if p == "/api/kb/queue":                      # 89 阅读队列统计
+            self._json(STORE.kb_queue())
+            return
+
+        if p == "/api/kb/graph":                      # 88 全库双链图
+            self._json(STORE.kb_link_graph())
+            return
+
+        if p == "/api/kb/related":                    # 92 相关推荐
+            qq = parse_qs(u.query)
+            self._json({"ok": True, "rows": STORE.kb_related(
+                int(qq.get("id", ["0"])[0] or 0),
+                int(qq.get("limit", ["5"])[0] or 5))})
+            return
+
+        if p == "/api/kb/export":                     # 93 整库导出 zip
+            items = STORE.kb_export()
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                used = {}
+                for it in items:
+                    name = it["name"] or "kb"
+                    if name in used:
+                        used[name] += 1
+                        name = "%s-%d" % (name, used[name])
+                    else:
+                        used[name] = 0
+                    z.writestr(name + ".md", it["md"])
+                z.writestr("_index.md",
+                           "# 资料库导出\n\n共 %d 条\n\n" % len(items)
+                           + "\n".join("- [%s](%s.md)" % (i["name"], i["name"])
+                                       for i in items))
+            self._bytes(buf.getvalue(), "application/zip", "kb-export.zip")
             return
 
         if p == "/api/openclaw/history":
@@ -2708,6 +2782,8 @@ class Handler(BaseHTTPRequestHandler):
                 (body.get("tags") or "").strip(),
                 (body.get("source") or "manual").strip(),
                 (body.get("source_path") or "").strip(),
+                (body.get("status") or "").strip(),
+                body.get("fav"),
             ))
             return
 
@@ -2721,6 +2797,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/kb/ask":
             self._kb_ask(body)
+            return
+
+        if p == "/api/kb/status":                     # 89 阅读状态
+            self._json(STORE.kb_status(
+                int(body.get("id", 0)), (body.get("status") or "").strip()))
+            return
+
+        if p == "/api/kb/summary":                    # 90 摘要卡
+            self._json(STORE.kb_set_summary(
+                int(body.get("id", 0)), body.get("summary", "")))
+            return
+
+        if p == "/api/kb/tags":                       # 91 批量改标签
+            self._json(STORE.kb_tags_bulk(
+                [int(x) for x in (body.get("ids") or [])],
+                (body.get("op") or "add").strip(),
+                (body.get("tag") or "").strip()))
+            return
+
+        if p == "/api/kb/fav":                        # 94 收藏
+            self._json(STORE.kb_fav(
+                int(body.get("id", 0)),
+                0 if body.get("on") in (0, False, "0") else 1))
+            return
+
+        if p == "/api/kb/reindex":                    # 87 老数据补建索引
+            self._json(STORE.kb_reindex_all())
             return
 
         if p == "/api/chats/save":
@@ -3564,7 +3667,8 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _kb_ask(self, body: dict):
-        """一次性问答：从本地知识库召回相关条目当上下文，交给模型答。"""
+        """一次性问答：从本地知识库召回相关条目当上下文，交给模型答。
+        也可以直接指定 id/ids，只拿这几条当上下文（摘要卡就走这条路）。"""
         q = (body.get("q") or "").strip()
         if not q:
             self._json({"ok": False, "error": "还没写问题"})
@@ -3573,7 +3677,24 @@ class Handler(BaseHTTPRequestHandler):
         if not rows:
             self._json({"ok": False, "error": "知识库还是空的，先去「知识」页加几条或导入文件"})
             return
-        ctx = _kb_retrieve(q, rows)
+        want = set()
+        for x in (body.get("ids") or []):
+            try:
+                want.add(int(x))
+            except (TypeError, ValueError):
+                pass
+        try:
+            if body.get("id"):
+                want.add(int(body["id"]))
+        except (TypeError, ValueError):
+            pass
+        if want:
+            ctx = [r for r in rows if int(r.get("id") or 0) in want]
+            if not ctx:
+                self._json({"ok": False, "error": "指定的资料没找到"})
+                return
+        else:
+            ctx = (STORE.kb_search(q, 6).get("rows") or []) or _kb_retrieve(q, rows)
         ctx_text = "\n\n".join(
             f"【知识 {i+1}】{(c.get('title') or '(无标题)')}\n{c.get('body','')}"
             for i, c in enumerate(ctx)
