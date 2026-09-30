@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import email
 import imaplib
+import os
 import re
 import smtplib
 from email.header import decode_header, make_header
@@ -376,16 +377,135 @@ class MailClient:
         msg["To"] = to
         msg["Subject"] = subject
         msg.set_content(body)
-        port = int(self.cfg.get("smtp_port") or 465)
+        return self.send_message(msg)
+
+    def send_message(self, msg) -> dict:
+        """把一封已经拼好的 EmailMessage 发出去。
+
+        传输方式看 smtp_tls：
+          ssl（默认，465） / starttls（587） / none（本机中继，明文，别对公网用）
+        """
+        err = self._need()
+        if err:
+            return {"ok": False, "error": err}
         try:
-            if port == 587:
-                s = smtplib.SMTP(self.cfg["smtp_host"], port, timeout=TIMEOUT)
-                s.starttls()
-            else:
-                s = smtplib.SMTP_SSL(self.cfg["smtp_host"], port, timeout=TIMEOUT)
-            s.login(self.cfg["user"], self.cfg["password"])
-            s.send_message(msg)
-            s.quit()
+            s = self._smtp_connect()
+            try:
+                if self.cfg.get("password"):
+                    s.login(self.cfg["user"], self.cfg["password"])
+                s.send_message(msg)
+            finally:
+                try:
+                    s.quit()
+                except Exception:  # noqa: BLE001
+                    pass
             return {"ok": True}
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _smtp_connect(self):
+        mode = (self.cfg.get("smtp_tls") or "").strip().lower()
+        port = int(self.cfg.get("smtp_port") or 465)
+        if not mode:
+            mode = "starttls" if port == 587 else "ssl"
+        host = self.cfg["smtp_host"]
+        if mode == "none":
+            return smtplib.SMTP(host, port, timeout=TIMEOUT)
+        if mode == "starttls":
+            s = smtplib.SMTP(host, port, timeout=TIMEOUT)
+            s.starttls()
+            return s
+        return smtplib.SMTP_SSL(host, port, timeout=TIMEOUT)
+
+    def fetch_attachments(self, uid: str, outdir: str) -> dict:
+        """65 附件批量下载：一封邮件的所有附件一次全取下来。"""
+        err = self._need()
+        if err:
+            return {"ok": False, "error": err}
+        try:
+            c = self._imap()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"连不上 IMAP：{type(e).__name__}: {e}"}
+        try:
+            c.login(self.cfg["user"], self.cfg["password"])
+            self._say_id(c)
+            ok, detail, _ = self._open_inbox(c)
+            if not ok:
+                return {"ok": False, "error": detail}
+
+            typ, d = c.uid("FETCH", uid.encode(), "(RFC822)")
+            if not d or not d[0] or not isinstance(d[0], tuple):
+                return {"ok": False, "error": "这封邮件取不到（可能已被删除）"}
+            msg = email.message_from_bytes(d[0][1])
+
+            os.makedirs(outdir, exist_ok=True)
+            rows, failed = [], []
+            used: set[str] = set()
+            for part in msg.walk():
+                if part.is_multipart():
+                    continue
+                fn = part.get_filename()
+                disp = str(part.get("Content-Disposition") or "").lower()
+                if not fn and "attachment" not in disp:
+                    continue
+                raw_name = dec(fn or part.get_param("name") or "attachment")
+                name = _safe_file(raw_name)
+                stem, ext = os.path.splitext(name)
+                n = 1
+                while name.lower() in used or os.path.exists(os.path.join(outdir, name)):
+                    name = f"{stem}({n}){ext}"
+                    n += 1
+                used.add(name.lower())
+                data = part.get_payload(decode=True)
+                if data is None:
+                    failed.append({"name": raw_name, "error": "这个附件解不出来（编码不认识）"})
+                    continue
+                path = os.path.join(outdir, name)
+                with open(path, "wb") as f:
+                    f.write(data)
+                rows.append({"name": name, "path": path, "size": len(data)})
+            return {"ok": True, "rows": rows, "failed": failed, "count": len(rows),
+                    "dir": outdir}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        finally:
+            try:
+                c.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def unread_count(self) -> dict:
+        """70 未读角标：只问一句未读有几封，不拉列表。"""
+        err = self._need()
+        if err:
+            return {"ok": False, "error": err, "n": 0}
+        try:
+            c = self._imap()
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"连不上 IMAP：{type(e).__name__}: {e}", "n": 0}
+        try:
+            c.login(self.cfg["user"], self.cfg["password"])
+            self._say_id(c)
+            typ, dat = c.select("INBOX")
+            if typ != "OK":
+                return {"ok": False, "error": "进不去收件箱", "n": 0}
+            typ, data = c.uid("SEARCH", None, "UNSEEN")
+            ids = (data[0] or b"").split()
+            return {"ok": True, "n": len(ids)}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(e).__name__}: {e}", "n": 0}
+        finally:
+            try:
+                c.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+_BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _safe_file(name: str) -> str:
+    """附件名当文件名用之前先洗干净，别让它跑出目录。"""
+    name = os.path.basename((name or "").replace("\\", "/"))
+    name = _BAD_CHARS.sub("_", name).strip(" .")
+    return name or "attachment"

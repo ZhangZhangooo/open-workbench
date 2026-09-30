@@ -93,7 +93,12 @@ DEFAULT_CONFIG = {
         "imap_port": 993,
         "smtp_host": "smtp.163.com",
         "smtp_port": 465,
+        "smtp_tls": "",          # 空=自动（465→ssl / 587→starttls）；也可 ssl/starttls/none
     },
+    # 63 多账号：上面那份 mail 永远等于「当前启用的账号」，切账号就是把它换掉。
+    # 这样所有老代码（MailClient(CFG["mail"])）一行都不用改。
+    "mail_accounts": [],         # [{id,name,user,password,imap_host,imap_port,smtp_host,smtp_port,smtp_tls}]
+    "mail_active": "",           # 当前启用账号的 id（空 = 用上面那份 mail）
     "scan_roots": ["C:\\", "D:\\", "E:\\"],
 }
 
@@ -135,6 +140,159 @@ IDX = indexer.Indexer(DB_PATH)
 STORE = store.Store()
 
 DAY = lambda: time.strftime("%Y-%m-%d")  # noqa: E731
+
+MAIL_ATT = os.path.join(DATA, "mail_att")
+MAIL_TLS_FIELDS = ("user", "password", "imap_host", "imap_port", "smtp_host",
+                   "smtp_port", "smtp_tls")
+
+
+def _mail_acct_id() -> str:
+    return str(CFG.get("mail_active") or "")
+
+
+def mail_client():
+    """当前启用账号的 MailClient。多账号就是「先把 CFG['mail'] 换成那个账号」。"""
+    return mailmod.MailClient(CFG["mail"])
+
+
+def _mail_apply_active(aid: str) -> dict:
+    """把启用账号的内容灌进 CFG['mail']，并落盘。返回被选中的账号（脱敏）。
+
+    注意 password 也要「照搬」：另一个账号的授权码绝不能留在内存里，
+    否则切到没存密码的账号时会拿上一个账号的授权码去登录。
+    """
+    accs = CFG.get("mail_accounts") or []
+    a = next((x for x in accs if str(x.get("id")) == str(aid)), None)
+    if a is None:
+        return {"ok": False, "error": "没这个账号"}
+    for k in MAIL_TLS_FIELDS:
+        if k in a:
+            CFG["mail"][k] = a[k]
+    CFG["mail_active"] = str(a.get("id"))
+    save_config(CFG)
+    return {"ok": True, "id": CFG["mail_active"], "user": CFG["mail"].get("user", "")}
+
+
+def _uid_dir(uid: str) -> str:
+    """uid 当目录名用之前洗一遍（uid 通常纯数字，但别假设）。"""
+    return "".join(ch for ch in str(uid) if ch.isalnum() or ch in "-_") or "unknown"
+
+
+def _mail_accounts_public() -> list[dict]:
+    """对外列账号：密码换成「有没有填」，别把授权码送去前端。"""
+    out = []
+    for a in CFG.get("mail_accounts") or []:
+        out.append({
+            "id": a.get("id"), "name": a.get("name") or a.get("user") or "账号",
+            "user": a.get("user", ""), "imap_host": a.get("imap_host", ""),
+            "imap_port": a.get("imap_port", 993), "smtp_host": a.get("smtp_host", ""),
+            "smtp_port": a.get("smtp_port", 465), "smtp_tls": a.get("smtp_tls", ""),
+            "password_set": bool(a.get("password")),
+            "active": str(a.get("id")) == _mail_acct_id(),
+        })
+    return out
+
+
+def _mail_rules_tags(subject: str, frm: str) -> str:
+    """64 收件规则：命中就返回标签（多规则命中用 / 连起来）。"""
+    try:
+        rules = STORE.mail_rules_list()
+    except Exception:  # noqa: BLE001
+        return ""
+    s = (subject or "").lower()
+    f = (frm or "").lower()
+    hits: list[str] = []
+    for r in rules:
+        c = (r.get("contains") or "").strip().lower()
+        if not c:
+            continue
+        field = r.get("field") or "from"
+        hit = ((field in ("from", "any") and c in f)
+               or (field in ("subject", "any") and c in s))
+        if hit:
+            t = (r.get("tag") or r.get("name") or "").strip()
+            if t and t not in hits:
+                hits.append(t)
+    return " / ".join(hits)
+
+
+_MAIL_UNREAD = {"n": 0, "ts": 0.0, "error": ""}
+
+
+def _mail_unread_cached(max_age: float = 300.0) -> dict:
+    """70 未读角标：缓存一下，别让侧栏每 2 秒就去 IMAP 敲一次门。"""
+    now = time.time()
+    if _MAIL_UNREAD["ts"] and now - _MAIL_UNREAD["ts"] < max_age:
+        return {**_MAIL_UNREAD, "cached": True}
+    if not CFG["mail"].get("user") or not CFG["mail"].get("password"):
+        _MAIL_UNREAD.update(n=0, ts=now, error="还没配邮箱")
+        return {**_MAIL_UNREAD, "cached": False}
+    try:
+        r = mail_client().unread_count()
+    except Exception as e:  # noqa: BLE001
+        r = {"ok": False, "n": 0, "error": f"{type(e).__name__}: {e}"}
+    _MAIL_UNREAD.update(n=int(r.get("n") or 0), ts=now, error=r.get("error") or "")
+    return {**_MAIL_UNREAD, "cached": False, "ok": bool(r.get("ok"))}
+
+
+def _mail_send_queued(body: dict) -> dict:
+    """69 定时发送：入队，到点由后台代发。"""
+    to = (body.get("to") or "").strip()
+    subj = (body.get("subject") or "").strip()
+    text = body.get("body") or ""
+    if not to:
+        return {"ok": False, "error": "还没填收件人"}
+    at = float(body.get("at") or 0)
+    if at <= 0:
+        return {"ok": False, "error": "还没填发送时间"}
+    r = STORE.mail_outbox_add(_mail_acct_id(), to, subj, text, at, "pending")
+    r["at"] = at
+    return r
+
+
+def _mail_tick() -> int:
+    """把到点的定时邮件发掉。返回这一轮处理了几封。"""
+    try:
+        due = STORE.mail_outbox_due(time.time())
+    except Exception:  # noqa: BLE001
+        return 0
+    n = 0
+    for row in due:
+        n += 1
+        try:
+            msg = _mail_build(row.get("mto") or "", row.get("subject") or "",
+                              row.get("body") or "")
+            acct = next((a for a in (CFG.get("mail_accounts") or [])
+                         if str(a.get("id")) == str(row.get("acct"))), None)
+            cli = mailmod.MailClient(acct) if acct else mail_client()
+            r = cli.send_message(msg)
+            if r.get("ok"):
+                STORE.mail_outbox_mark(row["id"], "sent")
+            else:
+                STORE.mail_outbox_mark(row["id"], "failed", r.get("error") or "发送失败")
+        except Exception as e:  # noqa: BLE001
+            STORE.mail_outbox_mark(row["id"], "failed", f"{type(e).__name__}: {e}")
+    return n
+
+
+def _mail_build(to: str, subject: str, text: str):
+    from email.message import EmailMessage as _EM
+    msg = _EM()
+    msg["From"] = CFG["mail"].get("user") or ""
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(text)
+    return msg
+
+
+def _mail_loop():
+    while True:
+        time.sleep(20)
+        try:
+            _mail_tick()
+        except Exception:  # noqa: BLE001
+            pass
+
 
 def _bridge_summary(action: str, p: dict) -> str:
     """把一条桥动作说成人话，写进审计日志用（前端那份是给界面看的，这份给留痕）。"""
@@ -1058,6 +1216,12 @@ class Handler(BaseHTTPRequestHandler):
                         "smtp_host": CFG["mail"]["smtp_host"],
                     },
                     "wps": bool(integrations.find_wps("et")),
+                    "mail_accounts": _mail_accounts_public(),
+                    "mail_active": _mail_acct_id(),
+                    # 只报缓存值：status 每 2 秒被轮一次，不能在这里等 IMAP
+                    "mail_unread": _MAIL_UNREAD["n"],
+                    "mail_unread_age": round(time.time() - _MAIL_UNREAD["ts"], 1)
+                    if _MAIL_UNREAD["ts"] else None,
                     "graph": {
                         "client_id": CFG["graph"]["client_id"],
                         "client_id_set": bool(CFG["graph"]["client_id"]),
@@ -1490,28 +1654,89 @@ class Handler(BaseHTTPRequestHandler):
                         "md": row.get("md") or ""})
             return
 
+        # ---------- G 域：邮件（多账号 / 规则 / 正文搜 / 草稿 / 发件队列 / 未读）----------
+        if p == "/api/mail/unread":
+            force = parse_qs(u.query).get("force", ["0"])[0] in ("1", "true")
+            self._json(_mail_unread_cached(0 if force else 300))
+            return
+
+        if p == "/api/mail/accounts":
+            cur = {k: CFG["mail"].get(k) for k in MAIL_TLS_FIELDS if k != "password"}
+            cur["password_set"] = bool(CFG["mail"].get("password"))
+            self._json({"rows": _mail_accounts_public(), "active": _mail_acct_id(),
+                        "mail": cur})
+            return
+
+        if p == "/api/mail/rules":
+            self._json({"rows": STORE.mail_rules_list()})
+            return
+
+        if p == "/api/mail/search":
+            q = parse_qs(u.query)
+            term = q.get("q", [""])[0]
+            self._json({"rows": STORE.mail_body_search(
+                term, int(q.get("limit", ["50"])[0] or 50)),
+                "cached_total": STORE.mail_body_count(), "q": term})
+            return
+
+        if p == "/api/mail/drafts":
+            self._json({"rows": STORE.mail_drafts()})
+            return
+
+        if p == "/api/mail/draft":
+            row = STORE.mail_draft_get(int(parse_qs(u.query).get("id", ["0"])[0] or 0))
+            self._json({"ok": bool(row), "row": row})
+            return
+
+        if p == "/api/mail/outbox":
+            self._json({"rows": STORE.mail_outbox_list(
+                int(parse_qs(u.query).get("limit", ["100"])[0] or 100)),
+                "pending": STORE.mail_outbox_pending()})
+            return
+
         if p == "/api/mail/list":
             q = parse_qs(u.query)
-            self._json(
-                mailmod.MailClient(CFG["mail"]).list(
-                    int(q.get("limit", ["30"])[0]),
-                    q.get("unseen", ["0"])[0] == "1",
-                    q.get("q", [""])[0],
-                )
+            r = mail_client().list(
+                int(q.get("limit", ["30"])[0]),
+                q.get("unseen", ["0"])[0] == "1",
+                q.get("q", [""])[0],
             )
+            # 64 收件规则 + 本地标签/星标：列表回来就地补齐，前端不用再问一遍
+            if r.get("ok"):
+                acct = _mail_acct_id()
+                uids = [x["uid"] for x in r.get("rows") or []]
+                marks = STORE.mail_meta_map(acct, uids)
+                for x in r.get("rows") or []:
+                    auto = _mail_rules_tags(x.get("subject"), x.get("from"))
+                    mine = (marks.get(x["uid"]) or {}).get("tags") or ""
+                    merged = " / ".join([t for t in (auto, mine) if t])
+                    x["tags"] = merged
+                    x["auto_tags"] = auto
+                    x["starred"] = (marks.get(x["uid"]) or {}).get("starred") or 0
+            self._json(r)
             return
 
         if p == "/api/mail/diag":
-            self._json(mailmod.MailClient(CFG["mail"]).diagnose())
+            self._json(mail_client().diagnose())
             return
 
         if p == "/api/mail/read":
             q = parse_qs(u.query)
-            self._json(
-                mailmod.MailClient(CFG["mail"]).read(
-                    q.get("uid", [""])[0], q.get("mark", ["1"])[0] != "0"
-                )
-            )
+            r = mail_client().read(q.get("uid", [""])[0], q.get("mark", ["1"])[0] != "0")
+            # 67 正文搜索要有料：读过的信就把正文缓存到本机，之后离线也能搜
+            if r.get("ok"):
+                try:
+                    STORE.mail_body_put(_mail_acct_id(), r.get("uid") or "",
+                                        r.get("subject") or "", r.get("from") or "",
+                                        r.get("date") or "", r.get("body") or "")
+                except Exception:  # noqa: BLE001
+                    pass
+                r["tags"] = _mail_rules_tags(r.get("subject"), r.get("from"))
+                r["auto_tags"] = r["tags"]
+                m = STORE.mail_meta_map(_mail_acct_id(), [r.get("uid") or ""])
+                r["my_tags"] = (m.get(r.get("uid") or "") or {}).get("tags") or ""
+                r["starred"] = (m.get(r.get("uid") or "") or {}).get("starred") or 0
+            self._json(r)
             return
 
         if p == "/api/graph/today":
@@ -1830,6 +2055,80 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/docs/ai-table":
             self._ai_table(body)
+            return
+
+        # ---------- G 域：邮件写操作 ----------
+        if p == "/api/mail/accounts/save":
+            self._mail_account_save(body)
+            return
+
+        if p == "/api/mail/accounts/del":
+            aid = str(body.get("id") or "")
+            CFG["mail_accounts"] = [x for x in (CFG.get("mail_accounts") or [])
+                                    if str(x.get("id")) != aid]
+            if _mail_acct_id() == aid:
+                CFG["mail_active"] = ""
+            save_config(CFG)
+            self._json({"ok": True, "rows": _mail_accounts_public()})
+            return
+
+        if p == "/api/mail/accounts/active":
+            self._json(_mail_apply_active(str(body.get("id") or "")))
+            return
+
+        if p == "/api/mail/rules/save":
+            self._json(STORE.mail_rule_save(
+                int(body.get("id", 0) or 0), (body.get("name") or "").strip(),
+                (body.get("field") or "from").strip(),
+                (body.get("contains") or "").strip(), (body.get("tag") or "").strip()))
+            return
+
+        if p == "/api/mail/rules/del":
+            self._json(STORE.mail_rule_del(int(body.get("id", 0) or 0)))
+            return
+
+        if p == "/api/mail/tag":
+            self._json(STORE.mail_tag(_mail_acct_id(), str(body.get("uid") or ""),
+                                      body.get("tags") or ""))
+            return
+
+        if p == "/api/mail/star":
+            self._json(STORE.mail_star(_mail_acct_id(), str(body.get("uid") or ""),
+                                       body.get("on")))
+            return
+
+        if p == "/api/mail/att/save":
+            uid = str(body.get("uid") or "")
+            if not uid:
+                self._json({"ok": False, "error": "没给 uid"})
+                return
+            outdir = os.path.join(MAIL_ATT, _uid_dir(uid))
+            self._json(mail_client().fetch_attachments(uid, outdir))
+            return
+
+        if p == "/api/mail/draft/save":
+            self._json(STORE.mail_draft_save(
+                int(body.get("id", 0) or 0), _mail_acct_id(), body.get("to") or "",
+                body.get("subject") or "", body.get("body") or ""))
+            return
+
+        if p == "/api/mail/draft/del":
+            self._json(STORE.mail_draft_del(int(body.get("id", 0) or 0)))
+            return
+
+        if p == "/api/mail/schedule":
+            self._json(_mail_send_queued(body))
+            return
+
+        if p == "/api/mail/outbox/cancel":
+            self._json(STORE.mail_outbox_cancel(int(body.get("id", 0) or 0)))
+            return
+
+        if p == "/api/mail/outbox/run":
+            n = _mail_tick()
+            self._json({"ok": True, "processed": n,
+                        "rows": STORE.mail_outbox_list(50),
+                        "pending": STORE.mail_outbox_pending()})
             return
 
         if p == "/api/docs/make":
@@ -2726,6 +3025,42 @@ class Handler(BaseHTTPRequestHandler):
             "rows": rows,
         })
 
+    # ---------- 邮件：多账号保存（63） ----------
+
+    def _mail_account_save(self, body: dict):
+        """新增或改一个邮箱账号。password 留空 = 不动原有授权码。"""
+        accs = list(CFG.get("mail_accounts") or [])
+        aid = str(body.get("id") or "").strip()
+        user = (body.get("user") or "").strip()
+        if not user:
+            self._json({"ok": False, "error": "邮箱地址没填"})
+            return
+        rec = next((x for x in accs if str(x.get("id")) == aid), None)
+        fields = {
+            "name": (body.get("name") or user).strip(),
+            "user": user,
+            "imap_host": (body.get("imap_host") or "").strip(),
+            "imap_port": str(body.get("imap_port") or "993").strip(),
+            "smtp_host": (body.get("smtp_host") or "").strip(),
+            "smtp_port": str(body.get("smtp_port") or "465").strip(),
+            "smtp_tls": (body.get("smtp_tls") or "").strip(),
+        }
+        if rec is None:
+            rec = {"id": aid or str(int(time.time() * 1000))}
+            accs.append(rec)
+        rec.update(fields)
+        pw = body.get("password")
+        if pw:
+            rec["password"] = pw
+        CFG["mail_accounts"] = accs
+        if not _mail_acct_id():            # 第一个存进来的自动顶上
+            CFG["mail_active"] = str(rec["id"])
+        save_config(CFG)
+        if _mail_acct_id() == str(rec["id"]):
+            _mail_apply_active(str(rec["id"]))
+        self._json({"ok": True, "id": rec["id"], "rows": _mail_accounts_public(),
+                    "active": _mail_acct_id(), "password_set": bool(rec.get("password"))})
+
     # ---------- 文档：生成（WPS 全套） ----------
 
     def _doc_make(self, body: dict):
@@ -3074,6 +3409,8 @@ def main():
     if "--host" in argv:
         host = argv[argv.index("--host") + 1]
     srv = ThreadingHTTPServer((host, port), Handler)
+    # 69 定时发送的看门人在后台，到点就把排队的邮件发出去
+    threading.Thread(target=_mail_loop, daemon=True).start()
     print(f"工作台已启动： http://{host}:{port}")
     try:
         srv.serve_forever()

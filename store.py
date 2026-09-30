@@ -223,6 +223,55 @@ CREATE TABLE IF NOT EXISTS doc_snaps (
     note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_doc_snaps ON doc_snaps(doc_id, ts);
+CREATE TABLE IF NOT EXISTS mail_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    field TEXT DEFAULT 'from',
+    contains TEXT,
+    tag TEXT,
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS mail_meta (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    acct TEXT DEFAULT '',
+    uid TEXT,
+    tags TEXT DEFAULT '',
+    starred INTEGER DEFAULT 0,
+    created REAL,
+    UNIQUE(acct, uid)
+);
+CREATE TABLE IF NOT EXISTS mail_body (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    acct TEXT DEFAULT '',
+    uid TEXT,
+    subject TEXT,
+    mfrom TEXT,
+    mdate TEXT,
+    body TEXT,
+    created REAL,
+    UNIQUE(acct, uid)
+);
+CREATE TABLE IF NOT EXISTS mail_draft (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    acct TEXT DEFAULT '',
+    mto TEXT DEFAULT '',
+    subject TEXT DEFAULT '',
+    body TEXT DEFAULT '',
+    created REAL,
+    updated REAL
+);
+CREATE TABLE IF NOT EXISTS mail_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    acct TEXT DEFAULT '',
+    mto TEXT,
+    subject TEXT,
+    body TEXT,
+    at REAL DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    error TEXT DEFAULT '',
+    created REAL,
+    sent REAL
+);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -1144,6 +1193,148 @@ class Store:
                   (snap.get("md") or "", time.time(), int(doc_id)), False)
         return {"ok": True, "chars": len(snap.get("md") or ""),
                 "restored_from": int(sid)}
+
+    # ---- G 域：邮件（收件规则 / 本地打标 / 正文缓存 / 草稿 / 发件队列）----
+
+    def mail_rules_list(self) -> list[dict]:
+        return self._run("SELECT * FROM mail_rules ORDER BY id")
+
+    def mail_rule_save(self, id_: int, name: str, field: str, contains: str,
+                       tag: str) -> dict:
+        field = field if field in ("from", "subject", "any") else "from"
+        if id_:
+            self._run("UPDATE mail_rules SET name=?, field=?, contains=?, tag=? WHERE id=?",
+                      (name, field, contains, tag, int(id_)), False)
+            return {"ok": True, "id": int(id_)}
+        self._run("INSERT INTO mail_rules (name, field, contains, tag, created) "
+                  "VALUES (?,?,?,?,?)", (name, field, contains, tag, time.time()), False)
+        return {"ok": True, "id": int(self._run("SELECT last_insert_rowid() AS i")[0]["i"])}
+
+    def mail_rule_del(self, id_: int) -> dict:
+        self._run("DELETE FROM mail_rules WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def mail_meta_map(self, acct: str, uids: list[str]) -> dict:
+        """一次把这一屏邮件的本地标记查出来（标签 / 星标）。"""
+        if not uids:
+            return {}
+        marks = ",".join("?" * len(uids))
+        rows = self._run(
+            f"SELECT uid, tags, starred FROM mail_meta WHERE acct=? AND uid IN ({marks})",
+            tuple([acct] + [str(x) for x in uids]))
+        return {r["uid"]: {"tags": r.get("tags") or "", "starred": int(r.get("starred") or 0)}
+                for r in rows}
+
+    def mail_tag(self, acct: str, uid: str, tags: str) -> dict:
+        self._run(
+            "INSERT INTO mail_meta (acct, uid, tags, created) VALUES (?,?,?,?) "
+            "ON CONFLICT(acct, uid) DO UPDATE SET tags=excluded.tags",
+            (acct, str(uid), tags or "", time.time()), False)
+        return {"ok": True, "tags": tags or ""}
+
+    def mail_star(self, acct: str, uid: str, on=None) -> dict:
+        cur = self._run("SELECT starred FROM mail_meta WHERE acct=? AND uid=?",
+                        (acct, str(uid)))
+        if on is None:
+            on = 0 if (cur and cur[0].get("starred")) else 1
+        self._run(
+            "INSERT INTO mail_meta (acct, uid, starred, created) VALUES (?,?,?,?) "
+            "ON CONFLICT(acct, uid) DO UPDATE SET starred=excluded.starred",
+            (acct, str(uid), int(on), time.time()), False)
+        return {"ok": True, "starred": bool(on)}
+
+    def mail_body_put(self, acct: str, uid: str, subject: str, mfrom: str,
+                      mdate: str, body: str) -> dict:
+        self._run(
+            "INSERT INTO mail_body (acct, uid, subject, mfrom, mdate, body, created) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(acct, uid) DO UPDATE SET subject=excluded.subject, "
+            "mfrom=excluded.mfrom, mdate=excluded.mdate, body=excluded.body",
+            (acct, str(uid), subject or "", mfrom or "", mdate or "",
+             (body or "")[:200000], time.time()), False)
+        return {"ok": True}
+
+    def mail_body_search(self, q: str, limit: int = 50) -> list[dict]:
+        """67 正文搜索：搜本地缓存过的邮件正文（离线也能搜）。"""
+        q = (q or "").strip()
+        if not q:
+            return []
+        like = "%" + q + "%"
+        rows = self._run(
+            "SELECT uid, acct, subject, mfrom, mdate, created, body FROM mail_body "
+            "WHERE subject LIKE ? OR mfrom LIKE ? OR body LIKE ? "
+            "ORDER BY created DESC LIMIT ?", (like, like, like, int(limit)))
+        for r in rows:
+            b = r.pop("body", "") or ""
+            i = b.find(q)
+            if i < 0:
+                r["snippet"] = b[:120]
+            else:
+                r["snippet"] = ("…" if i > 30 else "") + b[max(0, i - 30):i + 90]
+        return rows
+
+    def mail_body_count(self) -> int:
+        return int(self._run("SELECT COUNT(*) AS n FROM mail_body")[0]["n"])
+
+    def mail_drafts(self) -> list[dict]:
+        return self._run("SELECT * FROM mail_draft ORDER BY updated DESC LIMIT 200")
+
+    def mail_draft_save(self, id_: int, acct: str, to: str, subject: str,
+                        body: str) -> dict:
+        now = time.time()
+        if id_:
+            self._run("UPDATE mail_draft SET mto=?, subject=?, body=?, updated=? WHERE id=?",
+                      (to or "", subject or "", body or "", now, int(id_)), False)
+            return {"ok": True, "id": int(id_)}
+        self._run("INSERT INTO mail_draft (acct, mto, subject, body, created, updated) "
+                  "VALUES (?,?,?,?,?,?)", (acct, to or "", subject or "", body or "", now, now),
+                  False)
+        return {"ok": True, "id": int(self._run("SELECT last_insert_rowid() AS i")[0]["i"])}
+
+    def mail_draft_get(self, id_: int) -> dict:
+        rows = self._run("SELECT * FROM mail_draft WHERE id=?", (int(id_),))
+        return rows[0] if rows else {}
+
+    def mail_draft_del(self, id_: int) -> dict:
+        self._run("DELETE FROM mail_draft WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def mail_outbox_add(self, acct: str, to: str, subject: str, body: str,
+                        at: float = 0, status: str = "pending") -> dict:
+        now = time.time()
+        self._run(
+            "INSERT INTO mail_outbox (acct, mto, subject, body, at, status, created) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (acct, to or "", subject or "", body or "", float(at or 0), status, now), False)
+        return {"ok": True, "id": int(self._run("SELECT last_insert_rowid() AS i")[0]["i"])}
+
+    def mail_outbox_list(self, limit: int = 100) -> list[dict]:
+        rows = self._run("SELECT * FROM mail_outbox ORDER BY id DESC LIMIT ?", (int(limit),))
+        for r in rows:
+            r.pop("body", None)
+        return rows
+
+    def mail_outbox_get(self, id_: int) -> dict:
+        rows = self._run("SELECT * FROM mail_outbox WHERE id=?", (int(id_),))
+        return rows[0] if rows else {}
+
+    def mail_outbox_due(self, now: float) -> list[dict]:
+        return self._run(
+            "SELECT * FROM mail_outbox WHERE status='pending' AND at<=? ORDER BY at", (now,))
+
+    def mail_outbox_mark(self, id_: int, status: str, error: str = "") -> dict:
+        self._run("UPDATE mail_outbox SET status=?, error=?, sent=? WHERE id=?",
+                  (status, (error or "")[:600], time.time(), int(id_)), False)
+        return {"ok": True}
+
+    def mail_outbox_cancel(self, id_: int) -> dict:
+        self._run("UPDATE mail_outbox SET status='canceled' WHERE id=? AND status='pending'",
+                  (int(id_),), False)
+        return {"ok": True}
+
+    def mail_outbox_pending(self) -> int:
+        return int(self._run(
+            "SELECT COUNT(*) AS n FROM mail_outbox WHERE status='pending'")[0]["n"])
 
     # ---- 连接器推送日志：每次推送留痕，成功失败都可查 ----
 
