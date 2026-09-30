@@ -212,6 +212,8 @@ ALTERS = [
     "ALTER TABLE today ADD COLUMN note TEXT DEFAULT ''",
     "ALTER TABLE today ADD COLUMN done_at REAL",
     "ALTER TABLE pomodoro ADD COLUMN today_id INTEGER DEFAULT 0",
+    # D 域：AI 问一问
+    "ALTER TABLE chats ADD COLUMN sys TEXT DEFAULT ''",
 ]
 
 PROMPT_SCHEMA = """
@@ -1145,23 +1147,24 @@ class Store:
 
     # ---- 对话 ----
 
-    def chat_save(self, title: str, model: str, messages: list, id_: int | None = None) -> dict:
+    def chat_save(self, title: str, model: str, messages: list,
+                  id_: int | None = None, sys_: str = "") -> dict:
         """有 id 就更新同一条对话，没有才新建 —— 否则每轮都存会刷出一堆重复历史。"""
         import json
         blob = json.dumps(messages, ensure_ascii=False)
         if id_:
-            self._run("UPDATE chats SET title=?, model=?, messages=? WHERE id=?",
-                      (title, model, blob, id_), False)
+            self._run("UPDATE chats SET title=?, model=?, messages=?, sys=? WHERE id=?",
+                      (title, model, blob, sys_ or "", id_), False)
             return {"ok": True, "id": id_}
         cur = self.conn.execute(
-            "INSERT INTO chats (title, model, created, messages) VALUES (?,?,?,?)",
-            (title, model, time.time(), blob),
+            "INSERT INTO chats (title, model, created, messages, sys) VALUES (?,?,?,?,?)",
+            (title, model, time.time(), blob, sys_ or ""),
         )
         self.conn.commit()
         return {"ok": True, "id": cur.lastrowid}
 
     def chat_list(self) -> list[dict]:
-        rows = self._run("SELECT id, title, model, created FROM chats ORDER BY id DESC LIMIT 100")
+        rows = self._run("SELECT id, title, model, created, sys FROM chats ORDER BY id DESC LIMIT 100")
         return rows
 
     def chat_get(self, id_: int) -> dict:

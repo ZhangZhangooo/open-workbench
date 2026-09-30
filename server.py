@@ -1761,7 +1761,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/chats/save":
             self._json(STORE.chat_save(
                 body.get("title", ""), body.get("model", ""), body.get("messages", []),
-                body.get("id") or None,
+                body.get("id") or None, body.get("sys", ""),
             ))
             return
 
