@@ -186,6 +186,15 @@ CREATE TABLE IF NOT EXISTS task_tpl (
     items TEXT,
     created REAL
 );
+CREATE TABLE IF NOT EXISTS file_fav (
+    path TEXT PRIMARY KEY,
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS file_open (
+    path TEXT PRIMARY KEY,
+    opened REAL,
+    count INTEGER DEFAULT 0
+);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -663,6 +672,53 @@ class Store:
         return self._run(
             "SELECT tag, COUNT(*) AS n FROM file_tags GROUP BY tag ORDER BY n DESC, tag"
         )
+
+    # ---- 文件收藏 / 打开记录（跨模块聚合）----
+
+    def fav_toggle(self, path: str) -> dict:
+        if not path:
+            return {"ok": False, "error": "空路径"}
+        has = self._run("SELECT path FROM file_fav WHERE path=?", (path,))
+        if has:
+            self._run("DELETE FROM file_fav WHERE path=?", (path,), False)
+            return {"ok": True, "fav": False}
+        self._run("INSERT OR IGNORE INTO file_fav (path, created) VALUES (?,?)",
+                  (path, time.time()), False)
+        return {"ok": True, "fav": True}
+
+    def fav_paths(self) -> list[dict]:
+        return self._run("SELECT path, created FROM file_fav ORDER BY created DESC")
+
+    def fav_set(self) -> set:
+        try:
+            return {r[0] for r in self.conn.execute("SELECT path FROM file_fav").fetchall()}
+        except sqlite3.Error:
+            return set()
+
+    def open_log(self, path: str) -> dict:
+        """记一次「打开」。同一文件多次打开只累加次数、刷新时间。"""
+        if not path:
+            return {"ok": False}
+        self._run(
+            "INSERT INTO file_open (path, opened, count) VALUES (?,?,1) "
+            "ON CONFLICT(path) DO UPDATE SET opened=excluded.opened, count=count+1",
+            (path, time.time()), False,
+        )
+        return {"ok": True}
+
+    def open_recent(self, limit: int = 200) -> list[dict]:
+        return self._run(
+            "SELECT path, opened, count FROM file_open ORDER BY opened DESC LIMIT ?", (limit,)
+        )
+
+    def rename_path(self, old: str, new: str) -> dict:
+        """文件改了名：收藏 / 打开记录 / 标签里的路径一起跟过去，别丢关联。"""
+        for tbl in ("file_fav", "file_open", "file_tags"):
+            try:
+                self._run(f"UPDATE OR IGNORE {tbl} SET path=? WHERE path=?", (new, old), False)
+            except sqlite3.Error:
+                pass
+        return {"ok": True}
 
     # ---- 日程 ----
 

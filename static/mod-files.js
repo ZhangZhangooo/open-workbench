@@ -1,6 +1,6 @@
 /* 文件：全盘检索、筛选、导出、打开 */
 
-const { api, post, esc, fmtSize, fmtTime } = window.WB;
+const { api, post, esc, fmtSize, fmtTime, toast } = window.WB;
 const ROW = 46;
 
 export default {
@@ -32,11 +32,15 @@ export default {
       <div class="bar">
         <span id="stat">准备就绪</span>
         <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+          <button class="chip" id="mFav">★ 收藏</button>
+          <button class="chip" id="mOpened">最近打开</button>
           <button class="chip" id="mLarge">大文件</button>
           <button class="chip" id="mUsage">空间占用</button>
+          <button class="chip" id="mExt">类型统计</button>
           <button class="chip" id="mDup">重复文件</button>
           <button class="chip" id="mRecent">最近</button>
           <button class="chip" id="mGrep">全文</button>
+          <button class="chip" id="mFt" title="把文本文件内容建成本地索引，按内容搜更快">内容索引</button>
           <select id="minSize" style="height:30px;border:1px solid var(--line-strong);border-radius:8px;padding:0 8px;background:var(--surface);color:var(--ink);font-size:12px">
             <option value="0">不限大小</option>
             <option value="1048576">&gt; 1 MB</option>
@@ -56,6 +60,7 @@ export default {
         <input id="tagAdd" placeholder="打标签" style="height:32px;width:110px">
         <button class="btn slim" id="bulkTag">加标签</button>
         <input id="bulkDest" placeholder="目标文件夹，如 D:\\整理" style="height:32px;flex:1;min-width:150px">
+        <button class="btn slim" id="bulkRename">批量重命名</button>
         <button class="btn slim" id="bulkCopy">复制</button>
         <button class="btn slim" id="bulkMove">移动</button>
         <button class="btn slim" id="bulkTrash">送回收站</button>
@@ -79,6 +84,9 @@ export default {
     el.querySelector('#mDup').onclick = () => this.loadMode('dup');
     el.querySelector('#mRecent').onclick = () => this.loadMode('recent');
     el.querySelector('#mGrep').onclick = () => this.loadMode('grep');
+    el.querySelector('#mFav').onclick = () => this.loadMode('favs');
+    el.querySelector('#mOpened').onclick = () => this.loadMode('opened');
+    el.querySelector('#mFt').onclick = () => this.openFtPanel();
 
     el.querySelector('#list').addEventListener('scroll', () => {
       this.render();
@@ -103,6 +111,14 @@ export default {
         await post('/api/file-tags', { path: tx.dataset.p, tag: tx.dataset.t, op: 'del' });
         await this.loadTags();
         this.render();
+        return;
+      }
+      const fv = e.target.closest('.fav-star');
+      if (fv) {
+        const r = await post('/api/files/fav', { path: fv.dataset.p });
+        if (r.ok) toast(r.fav ? '已收藏，会置顶显示' : '已取消收藏');
+        if (this.mode === 'favs') { this.loadMode('favs'); return; }
+        await this.loadFavs();
         return;
       }
       const b = e.target.closest('button');
@@ -148,18 +164,29 @@ export default {
     this.loadStats();
     this.search(true);
 
-    // 标签 / 批量选择
+    // 标签 / 批量选择 / 收藏
     this.sel = new Set();
     this.tagMap = {};
     this.activeTag = '';
+    this.favSet = new Set();
     this.loadTags();
+    this.loadFavs();
 
     el.querySelector('#tagClear').onclick = () => { this.activeTag = ''; this.renderTagChips(); this.render(); };
     el.querySelector('#bulkClear').onclick = () => { this.sel.clear(); this.renderBulk(); this.render(); };
     el.querySelector('#bulkTag').onclick = () => this.bulkAddTag();
+    el.querySelector('#bulkRename').onclick = () => this.openRename();
     el.querySelector('#bulkCopy').onclick = () => this.bulk('copy');
     el.querySelector('#bulkMove').onclick = () => this.bulk('move');
     el.querySelector('#bulkTrash').onclick = () => this.bulk('trash');
+  },
+
+  async loadFavs() {
+    try {
+      const d = await api('/api/files/favs');
+      this.favSet = new Set((d.rows || []).map((r) => r.path));
+      this.render();
+    } catch (e) { /* ignore */ }
   },
 
   async loadTags() {
@@ -246,9 +273,15 @@ export default {
     const spacer = el.querySelector('#spacer');
     const n = this.rows.length;
 
-    this.view = this.activeTag
+    let view = this.activeTag
       ? this.rows.filter((r) => (this.tagMap[r.path] || []).includes(this.activeTag))
-      : this.rows;
+      : this.rows.slice();
+    // 收藏的置顶（稳定排序，其余保持原顺序）
+    if (this.favSet && this.favSet.size) {
+      view = view.slice().sort((a, b) =>
+        (this.favSet.has(b.path) ? 1 : 0) - (this.favSet.has(a.path) ? 1 : 0));
+    }
+    this.view = view;
     const vn = this.view.length;
 
     el.querySelector('#empty').style.display = n ? 'none' : 'block';
@@ -281,12 +314,26 @@ export default {
     const tags = (this.tagMap[r.path] || []).map((t) =>
       `<span class="tag-pill">${esc(t)}<button class="tag-x" data-p="${esc(r.path)}" data-t="${esc(t)}">×</button></span>`
     ).join('');
-    return `<div class="row" data-i="${i}">
+    const isFav = this.favSet && this.favSet.has(r.path);
+    if (!r.path) {
+      // 统计类行（按类型聚合）：没有真实文件路径，不给收藏/打开按钮
+      return `<div class="row stat">
+      <div class="nm">${esc(r.name)}</div>
+      <div class="pt">${esc(r.sub || '')}</div>
+      <div class="sz">${fmtSize(r.size)}</div>
+      <div class="mt">${r._stat != null ? r._stat + ' 个' : ''}</div>
+    </div>`;
+    }
+    const sub = r.sub || (r.count != null && r.opened
+      ? `开过 ${r.count} 次 · ${fmtTime(r.opened * 1000)}`
+      : fmtTime(r.mtime));
+    return `<div class="row${isFav ? ' fav' : ''}" data-i="${i}">
       <input type="checkbox" class="fchk" data-p="${esc(r.path)}" ${this.sel && this.sel.has(r.path) ? 'checked' : ''}>
+      <button class="fav-star${isFav ? ' on' : ''}" data-p="${esc(r.path)}" title="${isFav ? '取消收藏' : '收藏置顶'}">${isFav ? '★' : '☆'}</button>
       <div class="nm">${esc(r.name)}${tags ? `<div class="tags">${tags}</div>` : ''}</div>
       <div class="pt">${esc(r.snip || r.path)}</div>
       <div class="sz">${fmtSize(r.size)}</div>
-      <div class="mt">${r.sub || fmtTime(r.mtime)}</div>
+      <div class="mt">${sub}</div>
       <div class="op">
         <button data-act="ask" data-p="${esc(r.path)}">问 AI</button>
         <button data-act="open" data-p="${esc(r.path)}">打开</button>
@@ -343,6 +390,20 @@ export default {
         ext: '',
       }));
       stat.textContent = `${root} 下各目录占用（点目录名可下钻）`;
+    } else if (mode === 'ext') {
+      const d = await api('/api/files/ext?limit=80');
+      const rows0 = d.rows || [];
+      const total = d.total_size || 0;
+      rows = rows0.map((r) => ({
+        name: r.ext ? '.' + r.ext : '(无扩展名)',
+        path: '',
+        sub: `${r.count} 个 · ${total ? ((r.size / total) * 100).toFixed(1) : '0.0'}%`,
+        size: r.size,
+        mtime: 0,
+        ext: r.ext,
+        _stat: r.count,
+      }));
+      stat.textContent = `${d.total} 个文件按类型分 ${rows0.length} 类，合计 ${fmtSize(total)}`;
     } else if (mode === 'dup') {
       const d = await api('/api/files/dup?min_size=1048576&limit=40');
       rows = (d.rows || []).map((g) => ({
@@ -358,23 +419,45 @@ export default {
       const d = await api('/api/files/recent?limit=300');
       rows = d.rows || [];
       stat.textContent = `最近改动的 ${rows.length} 个文件`;
+    } else if (mode === 'favs') {
+      const d = await api('/api/files/favs');
+      rows = d.rows || [];
+      this.favSet = new Set(rows.map((r) => r.path));
+      stat.textContent = rows.length
+        ? `${rows.length} 个收藏（★ 置顶显示，点星取消）`
+        : '还没有收藏。点文件名左边的 ☆ 就能钉住常用文件。';
+    } else if (mode === 'opened') {
+      const d = await api('/api/files/recent-open?limit=200');
+      rows = d.rows || [];
+      stat.textContent = `最近打开过的 ${rows.length} 个文件（打开 / 预览都会记）`;
     } else if (mode === 'grep') {
       const q = el.querySelector('#q').value.trim();
       if (!q) {
         stat.textContent = '先在搜索框输入要找的内容，再点全文';
         return;
       }
-      stat.textContent = '正在翻文件内容…';
-      const d = await api('/api/grep?q=' + encodeURIComponent(q) + '&limit=60');
-      rows = (d.hits || []).map((h) => ({
-        name: h.name,
-        path: h.path,
-        snip: h.snippet,
-        size: 0,
-        mtime: 0,
-        ext: '',
-      }));
-      stat.textContent = `翻了 ${d.scanned} 个文本文件，命中 ${rows.length} 个`;
+      // 开了内容索引就走索引（快），否则实时翻文件
+      const ft = await api('/api/files/ft');
+      if (ft.enabled && ft.indexed > 0) {
+        stat.textContent = '正在查内容索引…';
+        const d = await api('/api/files/ft/search?q=' + encodeURIComponent(q) + '&limit=80');
+        rows = (d.hits || []).map((h) => ({
+          name: h.name, path: h.path, snip: h.snippet, size: 0, mtime: 0, ext: '',
+        }));
+        stat.textContent = `内容索引命中 ${rows.length} 个（已索引 ${d.indexed} 个文件）`;
+      } else {
+        stat.textContent = '正在翻文件内容…（没开内容索引，只能实时翻，慢）';
+        const d = await api('/api/grep?q=' + encodeURIComponent(q) + '&limit=60');
+        rows = (d.hits || []).map((h) => ({
+          name: h.name,
+          path: h.path,
+          snip: h.snippet,
+          size: 0,
+          mtime: 0,
+          ext: '',
+        }));
+        stat.textContent = `翻了 ${d.scanned} 个文本文件，命中 ${rows.length} 个`;
+      }
     }
 
     this.rows = rows;
@@ -388,6 +471,11 @@ export default {
     if (d.kind === 'image') {
       box.innerHTML = `<div class="pv-head">${esc(d.name)}</div>
         <img src="${d.url}" style="max-width:100%;max-height:150px;display:block">`;
+    } else if (d.kind === 'pdf') {
+      box.innerHTML = `<div class="pv-head">${esc(d.name)}
+        <button class="ask-ai" data-p="${esc(path)}">问 AI</button>
+        <button class="ask-claw" data-p="${esc(path)}">交给 OpenClaw</button></div>
+        <iframe src="${d.url}" style="width:100%;height:420px;border:0;border-radius:8px;background:#fff"></iframe>`;
     } else if (d.kind === 'text') {
       box.innerHTML = `<div class="pv-head">${esc(d.name)}${d.truncated ? '（只显示前 60KB）' : ''}
         <button class="ask-ai" data-p="${esc(path)}">问 AI</button>
@@ -403,6 +491,182 @@ export default {
     if (cb) cb.onclick = () => window.WB.go('claw', { task: '帮我分析这个文件：' + cb.dataset.p, autorun: false });
     box.classList.add('on');
     this.render();
+  },
+
+  /* ---------- 批量重命名：预览 → 确认 → 执行 ---------- */
+
+  _ov(html) {
+    this._closeOv();
+    const ov = document.createElement('div');
+    ov.className = 'tk-ov';
+    ov.innerHTML = `<div class="tk-modal">${html}</div>`;
+    ov.addEventListener('mousedown', (e) => { if (e.target === ov) this._closeOv(); });
+    document.body.appendChild(ov);
+    this._ovEl = ov;
+    return ov;
+  },
+
+  _closeOv() {
+    if (this._ovEl) { this._ovEl.remove(); this._ovEl = null; }
+  },
+
+  async openRename() {
+    if (!this.sel.size) { toast('先勾几个文件，再点批量重命名'); return; }
+    const paths = [...this.sel];
+    const ov = this._ov(`
+      <h3 style="margin:0 0 4px">批量重命名</h3>
+      <div class="note" style="margin-bottom:10px">
+        ${paths.length} 个文件。只改文件名，不动所在目录；先看预览，确认了才真改。
+      </div>
+      <div class="field" style="flex-wrap:wrap;gap:8px;align-items:center">
+        <select id="rnMode" style="max-width:150px">
+          <option value="replace">替换文字</option>
+          <option value="prefix">加前缀</option>
+          <option value="suffix">加后缀</option>
+          <option value="seq">编号序列</option>
+          <option value="ext">改扩展名</option>
+        </select>
+        <span id="rnFields" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+      </div>
+      <div id="rnPreview" class="tk-md" style="margin-top:10px;max-height:280px;overflow:auto"></div>
+      <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+        <button class="btn primary" id="rnGo" disabled>执行改名</button>
+        <button class="btn" id="rnClose">关掉</button>
+        <span class="note" id="rnState"></span>
+      </div>`);
+
+    const fields = ov.querySelector('#rnFields');
+    this._plan = null;
+    let pv = null;
+
+    async function doPlan() {
+      const d = await post('/api/files/rename/plan', { paths, rule: collect() });
+      this._plan = d;
+      const box = ov.querySelector('#rnPreview');
+      const items = d.items || [];
+      box.innerHTML = `<table style="width:100%;font-size:12.5px;border-collapse:collapse">
+        ${items.map((it) => `<tr>
+          <td style="padding:3px 6px;color:var(--ink-2)">${esc(it.from.split('\\').pop())}</td>
+          <td style="padding:3px 2px">→</td>
+          <td style="padding:3px 6px;color:${it.ok ? 'var(--ink)' : 'var(--ink-3)'}">${esc((it.to || '').split('\\').pop() || '—')}</td>
+          <td style="padding:3px 6px;color:${it.ok ? 'var(--ok)' : 'var(--err)'};white-space:nowrap">${it.ok ? '可以改' : esc(it.why)}</td>
+        </tr>`).join('')}
+      </table>`;
+      const nOk = d.n_ok || 0;
+      ov.querySelector('#rnState').textContent = `${nOk} 个能改，${items.length - nOk} 个跳过`;
+      ov.querySelector('#rnGo').disabled = !nOk;
+    }
+
+    const schedule = () => { clearTimeout(pv); pv = setTimeout(() => doPlan.call(this), 400); };
+
+    const renderFields = () => {
+      const m = ov.querySelector('#rnMode').value;
+      if (m === 'replace') {
+        fields.innerHTML = `<input id="rnFind" placeholder="要替换掉的文字" style="width:150px">
+          <input id="rnRepl" placeholder="换成什么（留空=删掉）" style="width:170px">`;
+      } else if (m === 'prefix') {
+        fields.innerHTML = '<input id="rnPre" placeholder="前缀，如 2026-" style="width:180px">';
+      } else if (m === 'suffix') {
+        fields.innerHTML = '<input id="rnSuf" placeholder="后缀，如 -备份" style="width:180px">';
+      } else if (m === 'seq') {
+        fields.innerHTML = `<input id="rnPre" placeholder="前缀" style="width:110px">
+          <input id="rnStart" type="number" value="1" placeholder="起始" style="width:80px" title="从几开始">
+          <input id="rnPad" type="number" value="2" placeholder="位数" style="width:70px" title="补零到几位">
+          <input id="rnSuf" placeholder="后缀" style="width:110px">`;
+      } else {
+        fields.innerHTML = '<input id="rnExt" placeholder="新扩展名，如 jpg" style="width:170px">';
+      }
+      ov.querySelector('#rnGo').disabled = true;
+      ov.querySelector('#rnPreview').innerHTML = '';
+      ov.querySelector('#rnState').textContent = '';
+      fields.querySelectorAll('input').forEach((i) => { i.oninput = schedule; });
+    };
+
+    const collect = () => {
+      const m = ov.querySelector('#rnMode').value;
+      const v = (id) => { const e = ov.querySelector('#' + id); return e ? e.value : ''; };
+      return {
+        mode: m, find: v('rnFind'), repl: v('rnRepl'),
+        prefix: v('rnPre'), suffix: v('rnSuf'),
+        start: v('rnStart') || 1, pad: v('rnPad') || 2, to_ext: v('rnExt'),
+        keep_ext: m !== 'ext',
+      };
+    };
+
+    renderFields();
+    ov.querySelector('#rnMode').onchange = () => { renderFields(); schedule(); };
+    ov.querySelector('#rnClose').onclick = () => this._closeOv();
+
+    ov.querySelector('#rnGo').onclick = async () => {
+      const items = (this._plan && this._plan.items || []).filter((x) => x.ok);
+      if (!items.length) return;
+      if (!confirm(`确认给 ${items.length} 个文件改名？改完可以用资源管理器撤销不了，想清楚。`)) return;
+      const d = await post('/api/files/rename/go', { items });
+      const results = d.results || [];
+      const okN = results.filter((r) => r.ok).length;
+      const bad = results.filter((r) => !r.ok);
+      toast(`改好 ${okN} 个${bad.length ? '，' + bad.length + ' 个没动' : ''}`);
+      ov.querySelector('#rnState').textContent = bad.length
+        ? '失败原因：' + bad.map((b) => (b.from.split('\\').pop() + ':' + b.error)).join('；')
+        : '全部改好了';
+      ov.querySelector('#rnGo').disabled = true;
+      this.sel.clear();
+      this.renderBulk();
+      await this.loadFavs();
+      this.search(true);
+      if (this.mode === 'favs' || this.mode === 'opened') this.loadMode(this.mode);
+    };
+  },
+
+  /* ---------- 内容索引开关 ---------- */
+
+  async openFtPanel() {
+    const st = await api('/api/files/ft');
+    const ov = this._ov(`
+      <h3 style="margin:0 0 4px">内容索引</h3>
+      <div class="note" style="margin-bottom:10px">
+        打开后，「全文」搜索先查本地索引，比实时翻文件快得多。
+        索引只存文本文件的内容片段，全在本机 data/index.db，不上传。
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px">
+        <input type="checkbox" id="ftOn" ${st.enabled ? 'checked' : ''}> 启用内容索引
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+        <span class="tag" id="ftStat">已索引 ${st.indexed} / 候选 ${st.candidates}</span>
+        <button class="btn slim primary" id="ftBuild">建/续建索引</button>
+        <button class="btn slim" id="ftClear">清空索引</button>
+        <button class="btn slim" id="ftClose">关掉</button>
+      </div>
+      <div class="note" id="ftMsg" style="margin-top:10px">
+        一次最多处理 800 个文件，可以多点几次接着攒。候选＝索引里体积小于 5MB 的文本类文件。
+      </div>`);
+
+    const refresh = async () => {
+      const s = await api('/api/files/ft');
+      ov.querySelector('#ftOn').checked = s.enabled;
+      ov.querySelector('#ftStat').textContent = `已索引 ${s.indexed} / 候选 ${s.candidates}`;
+    };
+    ov.querySelector('#ftClose').onclick = () => this._closeOv();
+    ov.querySelector('#ftOn').onchange = async (e) => {
+      const s = await post('/api/files/ft/toggle', { on: e.target.checked });
+      ov.querySelector('#ftMsg').textContent = s.enabled ? '已启用，全文搜索会走索引' : '已关闭，回到实时翻文件';
+      refresh();
+    };
+    ov.querySelector('#ftBuild').onclick = async () => {
+      const btn = ov.querySelector('#ftBuild');
+      btn.disabled = true;
+      ov.querySelector('#ftMsg').textContent = '正在读文件建索引…别关这个窗';
+      const s = await post('/api/files/ft/build', { limit: 800 });
+      btn.disabled = false;
+      ov.querySelector('#ftMsg').textContent = `这批索引了 ${s.indexed} 个（跳过 ${s.skipped}），还有 ${s.remaining} 个待续建`;
+      refresh();
+    };
+    ov.querySelector('#ftClear').onclick = async () => {
+      if (!confirm('清空内容索引？下次要用得重建（不影响任何原文件）')) return;
+      await post('/api/files/ft/clear', {});
+      ov.querySelector('#ftMsg').textContent = '索引已清空';
+      refresh();
+    };
   },
 
   async loadStats() {

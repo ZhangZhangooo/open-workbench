@@ -701,6 +701,111 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return False, str(e)
 
+    # ---------- 批量重命名：先出计划（不落盘），确认了才执行 ----------
+
+    RENAME_BAD = set('\\/:*?"<>|')
+
+    def _bad_new_name(self, base: str) -> str:
+        b = (base or "").strip()
+        if not b or b in (".", ".."):
+            return "名字不能为空"
+        if any(c in self.RENAME_BAD for c in b):
+            return '名字里不能有 \\ / : * ? " < > |'
+        if len(b) > 200:
+            return "名字太长"
+        return ""
+
+    def _new_stem(self, stem: str, i: int, rule: dict) -> tuple:
+        """按规则算出新主名；返回 (新主名, 新扩展名)。"""
+        mode = (rule.get("mode") or "replace").lower()
+        ext = rule.get("_ext", "")
+        if mode == "replace":
+            find = rule.get("find") or ""
+            return (stem.replace(find, rule.get("repl") or "") if find else stem), ext
+        if mode == "prefix":
+            return (rule.get("prefix") or "") + stem, ext
+        if mode == "suffix":
+            return stem + (rule.get("suffix") or ""), ext
+        if mode == "seq":
+            try:
+                start = int(rule.get("start") or 1)
+                pad = max(1, min(6, int(rule.get("pad") or 2)))
+            except (ValueError, TypeError):
+                start, pad = 1, 2
+            return ((rule.get("prefix") or "") + str(start + i).zfill(pad)
+                    + (rule.get("suffix") or "")), ext
+        if mode == "ext":
+            newext = (rule.get("to_ext") or "").lstrip(".")
+            return stem, ("." + newext if newext else "")
+        return stem, ext
+
+    def _rename_plan(self, paths: list, rule: dict) -> dict:
+        if not isinstance(paths, list) or not paths:
+            return {"ok": False, "error": "没有选中文件", "items": []}
+        keep_ext = rule.get("keep_ext", True)
+        items, used = [], set()
+        for i, p in enumerate(paths[:300]):
+            p = str(p or "")
+            if not p:
+                continue
+            d, base = os.path.dirname(p), os.path.basename(p)
+            stem, ext = os.path.splitext(base)
+            r2 = dict(rule)
+            r2["_ext"] = ext if keep_ext else ""
+            newstem, newext = self._new_stem(stem, i, r2)
+            newbase = newstem + (newext if keep_ext else "")
+            newpath = (d.rstrip("/\\") + "/" + newbase) if newbase else ""
+            why = ""
+            if not os.path.isfile(p):
+                why = "源文件不在了"
+            elif not IDX.by_paths([p]):
+                why = "不在索引里 —— 只整理扫出来的文件"
+            elif newbase == base:
+                why = "新名字和原来一样"
+            else:
+                why = self._bad_new_name(newbase)
+            if not why:
+                if os.path.exists(newpath):
+                    why = "已经有同名文件，不覆盖"
+                elif newpath.lower() in used:
+                    why = "和本批另一条撞名"
+            if newpath:
+                used.add(newpath.lower())
+            items.append({"from": p, "to": newpath, "ok": not why, "why": why})
+        return {"ok": True, "items": items,
+                "n_ok": sum(1 for x in items if x["ok"]), "n": len(items)}
+
+    def _rename_go(self, items: list) -> dict:
+        if not isinstance(items, list) or not items:
+            return {"ok": False, "error": "没有要执行的计划", "results": []}
+        results = []
+        for it in items[:300]:
+            a, b = str(it.get("from") or ""), str(it.get("to") or "")
+            why = ""
+            if not a or not b:
+                why = "参数不全"
+            elif not os.path.isfile(a):
+                why = "源文件不在了"
+            elif (os.path.dirname(os.path.normpath(a)).lower()
+                  != os.path.dirname(os.path.normpath(b)).lower()):
+                why = "不允许跨目录改名"
+            elif os.path.exists(b):
+                why = "目标已存在，拒绝覆盖"
+            else:
+                why = self._bad_new_name(os.path.basename(b))
+            if why:
+                results.append({"ok": False, "from": a, "error": why})
+                continue
+            try:
+                os.rename(a, b)
+                IDX.rename_path(a, b)
+                STORE.rename_path(a, b)
+                results.append({"ok": True, "from": a, "to": b})
+            except OSError as e:
+                results.append({"ok": False, "from": a, "error": str(e)})
+        return {"ok": True, "results": results,
+                "n_ok": sum(1 for r in results if r["ok"])}
+
     def _bulk(self, action: str, paths: list, dest: str) -> dict:
         """批量复制 / 移动 / 送回收站。删除只进回收站，不真删。"""
         if not isinstance(paths, list) or not paths:
@@ -941,6 +1046,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"rows": IDX.dir_usage(q.get("root", ["C:\\"])[0])})
             return
 
+        if p == "/api/files/ext":
+            q = parse_qs(u.query)
+            self._json(IDX.ext_stats(int(q.get("limit", ["80"])[0])))
+            return
+
         if p == "/api/files/dup":
             q = parse_qs(u.query)
             self._json({
@@ -953,6 +1063,44 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/files/recent":
             self._json({"rows": IDX.recent(int(parse_qs(u.query).get("limit", ["500"])[0]))})
+            return
+
+        if p == "/api/files/favs":
+            favs = STORE.fav_paths()
+            meta = {m["path"]: m for m in IDX.by_paths([f["path"] for f in favs])}
+            rows = []
+            for f in favs:
+                m = meta.get(f["path"])
+                if m:
+                    m = dict(m)
+                    m["fav_at"] = f.get("created")
+                    rows.append(m)
+            self._json({"rows": rows, "count": len(favs)})
+            return
+
+        if p == "/api/files/recent-open":
+            limit = int(parse_qs(u.query).get("limit", ["200"])[0])
+            rec = STORE.open_recent(limit)
+            meta = {m["path"]: m for m in IDX.by_paths([r["path"] for r in rec])}
+            rows = []
+            for r in rec:
+                m = meta.get(r["path"])
+                if m:
+                    m = dict(m)
+                    m["opened"] = r.get("opened")
+                    m["count"] = r.get("count")
+                    rows.append(m)
+            self._json({"rows": rows})
+            return
+
+        if p == "/api/files/ft":
+            self._json(IDX.ft_stats())
+            return
+
+        if p == "/api/files/ft/search":
+            q = parse_qs(u.query)
+            hits = IDX.ft_search(q.get("q", [""])[0], int(q.get("limit", ["80"])[0]))
+            self._json({"hits": hits, "indexed": IDX.ft_stats().get("indexed", 0)})
             return
 
         if p == "/api/grep":
@@ -1049,7 +1197,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == "/api/files/preview":
-            self._preview(parse_qs(u.query).get("path", [""])[0])
+            _pv = parse_qs(u.query).get("path", [""])[0]
+            if _pv:
+                STORE.open_log(_pv)   # 看过也算用过，进「最近打开」
+            self._preview(_pv)
             return
 
         if p == "/api/files/raw":
@@ -1719,9 +1870,38 @@ class Handler(BaseHTTPRequestHandler):
                     subprocess.Popen(["explorer", target])
                 else:
                     os.startfile(target)  # noqa: S606
+                    STORE.open_log(target)   # 「打开」也进最近使用
                 self._json({"ok": True})
             except Exception as e:  # noqa: BLE001
                 self._json({"ok": False, "error": str(e)})
+            return
+
+        if p == "/api/files/fav":
+            self._json(STORE.fav_toggle(body.get("path", "")))
+            return
+
+        if p == "/api/files/rename/plan":
+            self._json(self._rename_plan(
+                body.get("paths") or [], body.get("rule") or {}))
+            return
+
+        if p == "/api/files/rename/go":
+            self._json(self._rename_go(body.get("items") or []))
+            return
+
+        if p == "/api/files/ft/toggle":
+            on = bool(body.get("on", True))
+            IDX.ft_set(on)
+            self._json({"ok": True, **IDX.ft_stats()})
+            return
+
+        if p == "/api/files/ft/build":
+            self._json(IDX.ft_build(int(body.get("limit", 2000) or 2000)))
+            return
+
+        if p == "/api/files/ft/clear":
+            IDX.ft_clear()
+            self._json({"ok": True, **IDX.ft_stats()})
             return
 
         self.send_error(404)
@@ -2075,6 +2255,15 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if ext == "pdf":
+            # PDF 直接在台内嵌浏览器自己的阅读器看，不用跳出去
+            self._json({
+                "kind": "pdf",
+                "name": name,
+                "url": "/api/files/raw?path=" + urllib.parse.quote(path),
+            })
+            return
+
         if ext in self.TEXT_EXT:
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -2099,8 +2288,17 @@ class Handler(BaseHTTPRequestHandler):
         if not path or not os.path.isfile(path):
             self.send_error(404)
             return
-        ext = os.path.splitext(path)[1].lower()
-        mime = self.IMG_EXT.get(ext.lstrip("."), "application/octet-stream")
+        ext = os.path.splitext(path)[1].lower().lstrip(".")
+        mime = self.IMG_EXT.get(ext)
+        if not mime:
+            if ext == "pdf":
+                mime = "application/pdf"       # 内联显示，别触发下载
+            elif ext in ("mp4", "webm"):
+                mime = "video/" + ("mp4" if ext == "mp4" else "webm")
+            elif ext in ("mp3", "wav", "ogg", "m4a"):
+                mime = "audio/" + ("mpeg" if ext == "mp3" else ext)
+            else:
+                mime = "application/octet-stream"
         try:
             with open(path, "rb") as f:
                 data = f.read(24 << 20)
@@ -2110,6 +2308,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", "inline")
         self.end_headers()
         self.wfile.write(data)
 

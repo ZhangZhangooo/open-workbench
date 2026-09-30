@@ -309,6 +309,10 @@ main {
 .row .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .tag-pill { display: inline-flex; align-items: center; gap: 3px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 1px 8px; font-size: 11px; }
 .tag-x { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-size: 12px; padding: 0; line-height: 1; }
+.row.stat { cursor: default; }
+.row.stat:hover { background: transparent; }
+.row.stat .nm { font-weight: 600; }
+
 .tag-x:hover { color: #e23b3b; }
 
 .row .nm {
@@ -1977,3 +1981,15 @@ body.light ::-webkit-scrollbar-thumb {
   background: var(--surface);
 }
 .tk-tpl:hover { border-color: var(--line-strong); }
+
+/* ===== 文件模块：收藏星标 / 收藏行 ===== */
+
+.fav-star {
+  flex: none; border: 0; background: transparent; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 2px; color: var(--ink-3);
+  opacity: .55; transition: opacity .12s, transform .12s;
+}
+.row:hover .fav-star { opacity: 1; }
+.fav-star:hover { transform: scale(1.15); }
+.fav-star.on { color: var(--warn); opacity: 1; }
+.row.fav { background: var(--warn-soft); }

@@ -48,6 +48,11 @@ CREATE INDEX IF NOT EXISTS idx_files_ext   ON files(ext);
 CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
 CREATE INDEX IF NOT EXISTS idx_files_size  ON files(size);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS ft (
+    path    TEXT PRIMARY KEY,
+    content TEXT,
+    mtime   REAL
+);
 """
 
 
@@ -269,6 +274,19 @@ class Indexer:
             for r in rows
         ]
 
+    def ext_stats(self, limit: int = 80) -> dict:
+        """按扩展名统计：每类多少个、占多少空间。"""
+        rows = self._conn.execute(
+            "SELECT lower(COALESCE(ext,'')) AS e, COUNT(*) AS n, COALESCE(SUM(size),0) AS s "
+            "FROM files GROUP BY e ORDER BY s DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out = [{"ext": r[0] or "", "count": r[1], "size": r[2]} for r in rows]
+        tot = self._conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(size),0) FROM files"
+        ).fetchone()
+        return {"rows": out, "total": tot[0] or 0, "total_size": tot[1] or 0}
+
     def build_dirs(self) -> int:
         """把目录占用聚合进 dirs 表，供空间分析下钻用。"""
         with self._lock:
@@ -381,3 +399,121 @@ class Indexer:
             {"path": r[0], "name": r[1], "ext": r[2], "size": r[3], "mtime": r[4]}
             for r in rows
         ]
+
+    def by_paths(self, paths: list) -> list[dict]:
+        """按给定 path 列表取元数据（用于收藏 / 最近打开这类外部排序）。"""
+        if not paths:
+            return []
+        out: list[dict] = []
+        seen: set[str] = set()
+        # 逐条查，避免 IN 太长；量级只有几百
+        for p in paths:
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            r = self._conn.execute(
+                "SELECT path, name, ext, size, mtime FROM files WHERE path=?", (p,)
+            ).fetchone()
+            if r:
+                out.append({k: v for k, v in zip(
+                    ("path", "name", "ext", "size", "mtime"), r)})
+        return out
+
+    def rename_path(self, old: str, new: str) -> None:
+        """文件改名后同步索引里那一行，免得等下次全盘扫描。"""
+        try:
+            with self._lock:
+                base = os.path.basename(new)
+                self._conn.execute(
+                    "UPDATE files SET path=?, name=?, lname=?, ext=?, parent=? WHERE path=?",
+                    (new, base, base.lower(),
+                     base.rsplit(".", 1)[-1].lower() if "." in base else "",
+                     os.path.dirname(new), old),
+                )
+                self._conn.execute("UPDATE ft SET path=? WHERE path=?", (new, old))
+                self._conn.commit()
+        except sqlite3.Error:
+            pass
+
+    # ---------- 全文内容索引（可选开关） ----------
+
+    def ft_enabled(self) -> bool:
+        try:
+            r = self._conn.execute("SELECT v FROM meta WHERE k='ft_enabled'").fetchone()
+            return bool(r and r[0] == "1")
+        except sqlite3.Error:
+            return False
+
+    def ft_set(self, on: bool) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO meta (k, v) VALUES ('ft_enabled', ?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                ("1" if on else "0",),
+            )
+            self._conn.commit()
+
+    def ft_stats(self) -> dict:
+        try:
+            n = self._conn.execute("SELECT COUNT(*) FROM ft").fetchone()[0]
+        except sqlite3.Error:
+            n = 0
+        exts = sorted(self.TEXT_EXT_SET)
+        ph = ",".join("?" * len(exts))
+        cand = self._conn.execute(
+            f"SELECT COUNT(*) FROM files WHERE ext IN ({ph}) AND size < 5242880", exts
+        ).fetchone()[0]
+        return {"enabled": self.ft_enabled(), "indexed": n, "candidates": cand}
+
+    def ft_build(self, limit: int = 2000, max_bytes: int = 524288) -> dict:
+        """把还没进内容索引的文本文件读进来。单次限流，可重复点着攒。"""
+        exts = sorted(self.TEXT_EXT_SET)
+        ph = ",".join("?" * len(exts))
+        rows = self._conn.execute(
+            f"SELECT path, mtime FROM files WHERE ext IN ({ph}) AND size < 5242880 "
+            "AND path NOT IN (SELECT path FROM ft) ORDER BY mtime DESC LIMIT ?",
+            exts + [limit],
+        ).fetchall()
+        done = skipped = 0
+        for path, mtime in rows:
+            try:
+                if os.path.getsize(path) > max_bytes:
+                    skipped += 1
+                    continue
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read(max_bytes)
+            except OSError:
+                skipped += 1
+                continue
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO ft (path, content, mtime) VALUES (?,?,?) "
+                    "ON CONFLICT(path) DO UPDATE SET content=excluded.content, mtime=excluded.mtime",
+                    (path, text, mtime or 0),
+                )
+            done += 1
+        with self._lock:
+            self._conn.commit()
+        return {"ok": True, "indexed": done, "skipped": skipped,
+                "remaining": max(0, len(rows) - done - skipped)}
+
+    def ft_search(self, q: str, limit: int = 80) -> list[dict]:
+        if not q:
+            return []
+        rows = self._conn.execute(
+            "SELECT path, content FROM ft WHERE content LIKE ? LIMIT ?",
+            (f"%{q}%", limit),
+        ).fetchall()
+        out = []
+        for path, content in rows:
+            i = (content or "").lower().find(q.lower())
+            i = max(0, i)
+            snip = (content or "")[max(0, i - 40): i + 120].replace("\n", " ")
+            out.append({"path": path, "name": os.path.basename(path), "snippet": snip})
+        return out
+
+    def ft_clear(self) -> dict:
+        with self._lock:
+            self._conn.execute("DELETE FROM ft")
+            self._conn.commit()
+        return {"ok": True}
