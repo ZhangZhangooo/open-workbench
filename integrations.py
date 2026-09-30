@@ -412,21 +412,28 @@ def openclaw_skill_install(name: str, timeout: int = 180) -> dict:
     }
 
 
-def workbuddy_skills(max_depth: int = 4) -> dict:
+def workbuddy_skills(max_depth: int = 4, extra_roots=None) -> dict:
     """扫本机 WorkBuddy 技能目录，解析每个 SKILL.md 的 frontmatter。
 
-    两类来源：
+    三类来源：
       ~/.workbuddy/skills/                用户自己装的
       ~/.workbuddy/connectors/skills/     连接器带的（可能嵌套两层）
+      extra_roots                         用户自己注册的本地目录（117）
+
+    每条顺带抠一下「依赖」：SKILL.md 里声明/写到的外部命令，逐个拿 shutil.which
+    探一下本机在不在，前端就能一眼看出缺什么（116）。
     """
     home = os.path.expanduser("~")
     roots = [
         ("用户技能", os.path.join(home, ".workbuddy", "skills")),
         ("连接器技能", os.path.join(home, ".workbuddy", "connectors", "skills")),
     ]
+    for r in (extra_roots or []):
+        if isinstance(r, dict) and r.get("path"):
+            roots.append((r.get("label") or "自定义", r["path"]))
     rows = []
     for label, root in roots:
-        if not os.path.isdir(root):
+        if not root or not os.path.isdir(root):
             continue
         for dirpath, dirnames, filenames in os.walk(root):
             depth = dirpath[len(root):].count(os.sep)
@@ -437,21 +444,74 @@ def workbuddy_skills(max_depth: int = 4) -> dict:
                 continue
             fp = os.path.join(dirpath, "SKILL.md")
             try:
-                text = open(fp, encoding="utf-8", errors="replace").read(4000)
+                text = open(fp, encoding="utf-8", errors="replace").read(8000)
             except OSError:
                 continue
             name, desc = _frontmatter(text)
             if not name:
                 name = os.path.basename(dirpath)
+            deps = _skill_deps(text)
             rows.append({
                 "name": name,
                 "desc": desc,
                 "src": label,
                 "path": fp,
                 "dir": os.path.basename(dirpath),
+                "deps": [{"name": d, "ok": bool(shutil.which(d))} for d in deps],
+                "missing": [d for d in deps if not shutil.which(d)],
             })
     rows.sort(key=lambda r: (r["src"], r["name"].lower()))
     return {"ok": True, "rows": rows, "count": len(rows)}
+
+
+# 依赖小节标题：正文里以这些开头的一节，里面的 `反引号` 词当外部依赖
+_DEP_HEAD_RE = re.compile(
+    r"(依赖|前置|环境要求|需要安装|requirements?|dependencies|prerequisites|needs?)", re.I)
+
+
+def _skill_deps(text: str) -> list[str]:
+    """从 SKILL.md 里尽量抠出「要装什么才能用」的外部命令名。
+
+    只认两类明确写法：frontmatter 里的 requires/dependencies/bins，
+    以及正文一个标题带「依赖 / requirements」的小节里被反引号包住的词。
+    抠不出来就返回空，不瞎猜。判断「本机有没有」交给调用方 shutil.which。
+    """
+    deps: list[str] = []
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for ln in lines[1:]:
+            if ln.strip() == "---":
+                break
+            m = re.match(r"^(requires|dependencies|needs|bins?)\s*:\s*(.+)$", ln, re.I)
+            if m:
+                for tok in re.split(r"[,\s]+", m.group(2)):
+                    tok = tok.strip().strip("\"'`[]")
+                    if tok:
+                        deps.append(tok)
+    in_sec = False
+    taken = 0
+    for ln in lines:
+        if ln.lstrip().startswith("#"):
+            in_sec = bool(_DEP_HEAD_RE.search(ln))
+            continue
+        if in_sec and ln.strip():
+            for tok in re.findall(r"`([^`\n]{1,40})`", ln):
+                tok = tok.strip()
+                if tok and len(tok.split()) == 1:
+                    deps.append(tok.strip("-"))
+            taken += 1
+            if taken > 30:
+                break
+    out: list[str] = []
+    seen: set[str] = set()
+    for d in deps:
+        d = d.strip()
+        if not d or len(d) > 40 or d.lower() in seen:
+            continue
+        seen.add(d.lower())
+        out.append(d)
+    return out[:12]
+
 
 
 def _frontmatter(text: str) -> tuple[str, str]:

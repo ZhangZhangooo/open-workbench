@@ -384,6 +384,27 @@ CREATE TABLE IF NOT EXISTS wlog (
     created REAL
 );
 CREATE INDEX IF NOT EXISTS wlog_created ON wlog(created);
+
+-- M 域：技能库（115-120）
+CREATE TABLE IF NOT EXISTS skill_fav (
+    key TEXT PRIMARY KEY,           -- 来源|名字
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS skill_runs (
+    key TEXT PRIMARY KEY,
+    name TEXT,
+    src TEXT,
+    runs INTEGER DEFAULT 0,
+    last_run REAL,
+    last_ok INTEGER DEFAULT 1,
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS skill_dirs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT,
+    label TEXT,
+    created REAL
+);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -3165,5 +3186,86 @@ class Store:
 
     def log_clear(self) -> dict:
         self._run("DELETE FROM wlog", (), False)
+        return {"ok": True}
+
+    # ---------------- M 域：技能库（115-120）----------------
+
+    # 115 收藏钉顶
+
+    def skill_fav_list(self) -> list[str]:
+        return [r["key"] for r in self._run("SELECT key FROM skill_fav ORDER BY created DESC")]
+
+    def skill_fav_toggle(self, key: str, on=None) -> dict:
+        key = (key or "").strip()
+        if not key:
+            return {"ok": False, "error": "没指定技能"}
+        cur = self._run("SELECT key FROM skill_fav WHERE key=?", (key,))
+        is_on = bool(cur)
+        if on is None:
+            on = not is_on
+        on = bool(on)
+        if on and not is_on:
+            self._run("INSERT OR REPLACE INTO skill_fav (key, created) VALUES (?,?)",
+                      (key, time.time()), False)
+        elif (not on) and is_on:
+            self._run("DELETE FROM skill_fav WHERE key=?", (key,), False)
+        return {"ok": True, "key": key, "fav": on}
+
+    # 118 运行统计
+
+    def skill_runs_map(self) -> dict:
+        return {r["key"]: r for r in self._run("SELECT * FROM skill_runs")}
+
+    def skill_use(self, key: str, name: str = "", src: str = "", ok=1) -> dict:
+        key = (key or "").strip()
+        if not key:
+            return {"ok": False, "error": "没指定技能"}
+        now = time.time()
+        cur = self._run("SELECT key FROM skill_runs WHERE key=?", (key,))
+        if cur:
+            self._run(
+                "UPDATE skill_runs SET runs=COALESCE(runs,0)+1, last_run=?, last_ok=?, "
+                "name=COALESCE(NULLIF(?,''), name), src=COALESCE(NULLIF(?,''), src) WHERE key=?",
+                (now, 1 if ok else 0, name or "", src or "", key), False)
+        else:
+            self._run(
+                "INSERT INTO skill_runs (key, name, src, runs, last_run, last_ok, created) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (key, name or "", src or "", 1, now, 1 if ok else 0, now), False)
+        rows = self._run("SELECT * FROM skill_runs WHERE key=?", (key,))
+        return {"ok": True, "row": rows[0] if rows else None}
+
+    def skill_stats(self, limit: int = 20) -> dict:
+        rows = self._run(
+            "SELECT * FROM skill_runs ORDER BY runs DESC, last_run DESC LIMIT ?", (limit,))
+        tot = self._run("SELECT COUNT(*) AS n, COALESCE(SUM(runs),0) AS s FROM skill_runs")
+        return {"rows": rows,
+                "skills": (tot[0]["n"] if tot else 0),
+                "total": (tot[0]["s"] if tot else 0)}
+
+    # 117 自定义技能目录（本地注册）
+
+    def skill_dirs_list(self) -> list[dict]:
+        return self._run("SELECT * FROM skill_dirs ORDER BY id DESC")
+
+    def skill_dir_add(self, path: str, label: str = "") -> dict:
+        path = (path or "").strip().strip('"').strip("'")
+        if not path:
+            return {"ok": False, "error": "没填目录"}
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isdir(path):
+            return {"ok": False, "error": "目录不存在：%s" % path}
+        dup = self._run("SELECT id FROM skill_dirs WHERE path=?", (path,))
+        if dup:
+            return {"ok": True, "id": dup[0]["id"], "dup": True}
+        base = os.path.basename(path.rstrip("/\\")) or "自定义"
+        cur = self.conn.execute(
+            "INSERT INTO skill_dirs (path, label, created) VALUES (?,?,?)",
+            (path, (label or "").strip() or base, time.time()))
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid}
+
+    def skill_dir_del(self, did: int) -> dict:
+        self._run("DELETE FROM skill_dirs WHERE id=?", (did,), False)
         return {"ok": True}
 

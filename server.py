@@ -781,6 +781,67 @@ def _openclaw_ctx_parts() -> str:
     return f"今天是 {d}。" if d else ""
 
 
+# ---- M 域：技能推荐（120）----
+
+def _skill_tokens(s: str) -> set:
+    """把技能名/说明拆成可比的关键词：ASCII 词（≥3 字）+ 中文二元组。"""
+    s = (s or "").lower()
+    toks = set(re.findall(r"[a-z0-9_]{3,}", s))
+    # 中日韩统一表意文字：按单字成二元组，跟 J 域倒排索引一个思路
+    cn = re.findall(r"[\u4e00-\u9fff]", s)
+    for i in range(len(cn) - 1):
+        toks.add(cn[i] + cn[i + 1])
+    return toks
+
+
+def _skill_recommend(limit: int = 8) -> dict:
+    """按使用习惯推荐：拿「常用 + 收藏」技能的关键词当画像，
+    在没用过、又能用的技能里按关键词重合度打分排序。没有画像时
+    退化成「都可用但还没用过」的清单，并如实标注原因。"""
+    wb = integrations.workbuddy_skills(extra_roots=STORE.skill_dirs_list()).get("rows", [])
+    claw = integrations.openclaw_skills().get("rows", [])
+    cand = []
+    for r in wb:
+        cand.append({"key": "wb|" + r["name"], "name": r["name"], "desc": r.get("desc", ""),
+                     "src": r.get("src", "WorkBuddy"), "srcKey": "wb", "ok": True})
+    for r in claw:
+        cand.append({"key": "claw|" + r["name"], "name": r["name"], "desc": r.get("desc", ""),
+                     "src": "OpenClaw", "srcKey": "claw",
+                     "ok": bool(r.get("eligible")) and not r.get("disabled")})
+
+    used = STORE.skill_runs_map()
+    favs = set(STORE.skill_fav_list())
+    used_keys = set(used.keys())
+
+    # 画像：用得最多的前 5 + 收藏的
+    top = sorted(used.values(), key=lambda x: x.get("runs", 0), reverse=True)[:5]
+    prof: set = set()
+    name_of = {}
+    for r in cand:
+        name_of[r["key"]] = r["name"]
+    for t in top:
+        prof |= _skill_tokens(t.get("name", ""))
+    for k in favs:
+        prof |= _skill_tokens(name_of.get(k, k.split("|", 1)[-1]))
+
+    out = []
+    for c in cand:
+        if c["key"] in used_keys or c["key"] in favs:
+            continue
+        if not c["ok"]:
+            continue
+        toks = _skill_tokens(c["name"] + " " + c["desc"])
+        inter = prof & toks
+        score = len(inter) * 3
+        if prof and not inter:
+            continue
+        reason = "和你常用的技能相关" if inter else "可用但还没用过，试试"
+        out.append({**c, "score": score, "reason": reason})
+
+    out.sort(key=lambda x: (-x["score"], x["name"].lower()))
+    return {"ok": True, "rows": out[:limit], "has_profile": bool(prof)}
+
+
 def today_str() -> str:
     return time.strftime("%Y-%m-%d")
 
@@ -1644,9 +1705,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/skills":
             self._json({
-                "wb": integrations.workbuddy_skills(),
+                "wb": integrations.workbuddy_skills(extra_roots=STORE.skill_dirs_list()),
                 "claw": integrations.openclaw_skills(),
+                "fav": STORE.skill_fav_list(),
+                "stats": STORE.skill_stats(),
+                "dirs": STORE.skill_dirs_list(),
             })
+            return
+
+        if p == "/api/skills/recommend":               # 120 按使用习惯推荐
+            self._json(_skill_recommend())
             return
 
         if p == "/api/claw/agents":
@@ -3048,7 +3116,33 @@ class Handler(BaseHTTPRequestHandler):
             if not name:
                 self._json({"ok": False, "error": "没指定技能名"})
                 return
-            self._json(integrations.openclaw_skill_install(name))
+            r = integrations.openclaw_skill_install(name)
+            if r.get("ok"):
+                # 装上了就算用过一次（118）
+                STORE.skill_use("claw|" + name, name, "OpenClaw", 1)
+                STORE.log_add("ok", f"装了 OpenClaw 技能「{name}」", "skills")
+            self._json(r)
+            return
+
+        # ---- M 域：技能库（115-120）----
+        if p == "/api/skills/fav":                     # 115 收藏钉顶
+            self._json(STORE.skill_fav_toggle(body.get("key", ""), body.get("on")))
+            return
+        if p == "/api/skills/use":                     # 118 记一次使用
+            r = STORE.skill_use(body.get("key", ""), body.get("name", ""),
+                                body.get("src", ""), body.get("ok", 1))
+            if r.get("ok"):
+                STORE.log_add("info", f"用了一次技能「{body.get('name') or body.get('key')}」", "skills")
+            self._json(r)
+            return
+        if p == "/api/skills/dir/add":                 # 117 注册自定义技能目录
+            r = STORE.skill_dir_add(body.get("path", ""), body.get("label", ""))
+            if r.get("ok"):
+                STORE.log_add("info", f"注册自定义技能目录：{body.get('path')}", "skills")
+            self._json(r)
+            return
+        if p == "/api/skills/dir/del":
+            self._json(STORE.skill_dir_del(int(body.get("id", 0) or 0)))
             return
 
         if p.startswith("/api/bridge/"):
