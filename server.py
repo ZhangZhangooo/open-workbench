@@ -1587,6 +1587,47 @@ class Handler(BaseHTTPRequestHandler):
             self._json(STORE.room_list())
             return
 
+        # ---- K 域 生活（95-104）----
+
+        if p == "/api/ledger":                         # 95 流水 + 当月汇总
+            q = parse_qs(u.query)
+            month = (q.get("month", [""])[0] or "").strip()
+            self._json({
+                "ok": True,
+                "rows": STORE.ledger_list(month, (q.get("kind", [""])[0] or "").strip()),
+                "summary": STORE.ledger_summary(month),
+            })
+            return
+
+        if p == "/api/ledger/months":                  # 102 收入看板：按月对比
+            self._json(STORE.ledger_months(
+                int(parse_qs(u.query).get("limit", ["12"])[0] or 12)))
+            return
+
+        if p == "/api/budget":                         # 96 阈值 + 本月超标情况
+            month = (parse_qs(u.query).get("month", [""])[0] or "").strip()
+            self._json({"ok": True, "limits": STORE.budget_limits(),
+                        "check": STORE.budget_check(month)})
+            return
+
+        if p == "/api/devices":                        # 97 设备台账 + 99 充电区
+            self._json({"ok": True, "rows": STORE.devices_list(),
+                        "charge": STORE.charge_board()})
+            return
+
+        if p == "/api/netmap":                         # 100 网络拓扑
+            self._json({"ok": True, "rows": STORE.net_list()})
+            return
+
+        if p == "/api/wishes":                         # 101 采购清单
+            self._json(STORE.wishes_list())
+            return
+
+        if p == "/api/weights":                        # 104 体重简记
+            self._json({"ok": True, "rows": STORE.weight_list(),
+                        "stats": STORE.weight_stats()})
+            return
+
         if p == "/api/clip":
             self._json({"rows": STORE.clip_list()})
             return
@@ -2249,6 +2290,112 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/room/del":
             self._json(STORE.room_del(int(body.get("id", 0))))
+            return
+
+        # ---- K 域 生活（95-104）----
+
+        if p == "/api/ledger/add":
+            self._json(STORE.ledger_add(
+                body.get("day") or DAY(), (body.get("kind") or "支出").strip(),
+                body.get("amount"), (body.get("category") or "").strip(),
+                body.get("note", "")))
+            return
+
+        if p == "/api/ledger/del":
+            self._json(STORE.ledger_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/budget/save":                    # 96 存分类阈值
+            self._json(STORE.budget_limits_save(body.get("limits") or {}))
+            return
+
+        if p == "/api/budget/push":                    # 96 把超支提醒推给连接器
+            month = (body.get("month") or "").strip()
+            chk = STORE.budget_check(month)
+            over = chk.get("over") or []
+            if not over:
+                self._json({"ok": False, "error": "这个月没有超支的分类，不用推"})
+                return
+            txt = "【超支提醒】" + chk["month"] + "\n" + "\n".join(
+                "· %s：已花 ¥%.2f / 阈值 ¥%.2f（超 ¥%.2f）"
+                % (o["cat"], o["used"], o["limit"], o["used"] - o["limit"]) for o in over)
+            conns = _enabled_connectors()
+            if not conns:
+                self._json({"ok": False, "error": "还没启用任何连接器（设置页里加一个）"})
+                return
+            title = "超支提醒"
+            sent, failed = [], []
+            for c in conns:
+                try:
+                    res = integrations.connector_push(c, title, txt)
+                except Exception as e:  # noqa: BLE001
+                    res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+                who = c.get("name") or c.get("id") or c.get("type") or "?"
+                (sent if res.get("ok") else failed).append(who)
+                STORE.connector_push_log((c.get("type") or ""), who, title,
+                                         bool(res.get("ok")),
+                                         res.get("error") or res.get("msg") or "")
+            self._json({"ok": bool(sent), "sent": sent, "failed": failed, "text": txt,
+                        "error": "" if sent else "推送都失败了，看连接器日志"})
+            return
+
+        if p == "/api/budget/check":                   # 96 只查不改，给前端弹窗用
+            self._json(STORE.budget_check((body.get("month") or "").strip()))
+            return
+
+        if p == "/api/devices/save":
+            self._json(STORE.device_save(
+                body.get("id") or None, body.get("name", ""), body.get("kind", ""),
+                body.get("zone", ""), body.get("bought", ""), body.get("warranty") or 0,
+                body.get("price") or 0, body.get("charge", ""), body.get("note", "")))
+            return
+
+        if p == "/api/devices/charge":                 # 99 改充电状态
+            self._json(STORE.device_charge(
+                int(body.get("id", 0)), (body.get("charge") or "").strip()))
+            return
+
+        if p == "/api/devices/del":
+            self._json(STORE.device_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/netmap/save":
+            self._json(STORE.net_save(
+                body.get("id") or None, body.get("name", ""), body.get("kind", ""),
+                body.get("parent") or 0, body.get("port", ""), body.get("ip", ""),
+                body.get("note", "")))
+            return
+
+        if p == "/api/netmap/del":
+            self._json(STORE.net_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/wishes/save":
+            self._json(STORE.wish_save(
+                body.get("id") or None, body.get("name", ""), body.get("price") or 0,
+                body.get("shop", ""), body.get("url", ""), body.get("priority") or 2,
+                (body.get("status") or "想要").strip(), body.get("note", "")))
+            return
+
+        if p == "/api/wishes/buy":                     # 101 一键已购（顺手记支出）
+            self._json(STORE.wish_buy(int(body.get("id", 0)), body.get("day") or ""))
+            return
+
+        if p == "/api/wishes/del":
+            self._json(STORE.wish_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/weights/add":
+            self._json(STORE.weight_add(
+                body.get("day") or DAY(), body.get("kg"), body.get("note", "")))
+            return
+
+        if p == "/api/weights/del":
+            self._json(STORE.weight_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/life/migrate":                   # 老 lists 数据搬到新表
+            self._json(STORE.life_migrate())
             return
 
         # ---- 剪贴板历史 ----

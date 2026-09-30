@@ -301,6 +301,64 @@ CREATE TABLE IF NOT EXISTS mail_outbox (
     created REAL,
     sent REAL
 );
+-- K 域：生活（95-104）
+-- 95 记账：收支流水（kind 支出/收入），分类汇总与月度对比都从这张表算
+CREATE TABLE IF NOT EXISTS ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT,
+    kind TEXT DEFAULT '支出',
+    amount REAL DEFAULT 0,
+    category TEXT DEFAULT '',
+    note TEXT,
+    created REAL
+);
+CREATE INDEX IF NOT EXISTS ledger_day ON ledger(day);
+-- 97 设备台账 / 99 充电区：一台设备一条，charge 就是充电状态
+CREATE TABLE IF NOT EXISTS devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    kind TEXT DEFAULT '',
+    zone TEXT DEFAULT '',
+    bought TEXT DEFAULT '',
+    warranty INTEGER DEFAULT 0,
+    price REAL DEFAULT 0,
+    charge TEXT DEFAULT '',
+    note TEXT,
+    created REAL
+);
+-- 100 网络拓扑：设备-交换机-端口，parent 指向上游
+CREATE TABLE IF NOT EXISTS net_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    kind TEXT DEFAULT '',
+    parent INTEGER DEFAULT 0,
+    port TEXT DEFAULT '',
+    ip TEXT DEFAULT '',
+    note TEXT,
+    created REAL
+);
+-- 101 采购清单：想买 / 比价 / 已购
+CREATE TABLE IF NOT EXISTS wishes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    price REAL DEFAULT 0,
+    shop TEXT DEFAULT '',
+    url TEXT DEFAULT '',
+    priority INTEGER DEFAULT 2,
+    status TEXT DEFAULT '想要',
+    bought_at TEXT DEFAULT '',
+    note TEXT,
+    created REAL
+);
+-- 104 体重简记：一天最多一条，同天再记就覆盖
+CREATE TABLE IF NOT EXISTS weights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT,
+    kg REAL DEFAULT 0,
+    note TEXT,
+    created REAL
+);
+CREATE INDEX IF NOT EXISTS weights_day ON weights(day);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -2506,3 +2564,378 @@ class Store:
         out["today_undone"] = self.conn.execute(
             "SELECT COUNT(*) FROM today WHERE done=0 AND day=?", (_today(),)).fetchone()[0]
         return out
+
+    # ================= K 域：生活（95-104） =================
+
+    LIFE_CATS = ("餐饮", "交通", "购物", "学习", "娱乐", "房租水电", "医疗", "人情", "其它")
+    CHARGE_STATES = ("", "充电中", "已满", "待充", "不用充")
+    WISH_STATES = ("想要", "比价中", "已购", "不买了")
+
+    # ---- 95 记账 ----
+
+    def ledger_add(self, day: str, kind: str, amount, category: str = "",
+                   note: str = "") -> dict:
+        if kind not in ("支出", "收入"):
+            return {"ok": False, "error": "类型只能是 支出 / 收入"}
+        day = (day or "").strip() or _today()
+        try:
+            amt = round(float(amount or 0), 2)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "金额填得不对"}
+        if amt <= 0:
+            return {"ok": False, "error": "金额要大于 0"}
+        cur = self.conn.execute(
+            "INSERT INTO ledger (day,kind,amount,category,note,created) VALUES (?,?,?,?,?,?)",
+            (day, kind, amt, (category or "").strip() or "其它", (note or "").strip(),
+             time.time()))
+        self.conn.commit()
+        r = {"ok": True, "id": cur.lastrowid}
+        if kind == "支出":                       # 96 记完顺手看一眼这个月有没有超
+            r["over"] = self.budget_check(day[:7]).get("over", [])
+        return r
+
+    def ledger_del(self, id_: int) -> dict:
+        self._run("DELETE FROM ledger WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def ledger_list(self, month: str = "", kind: str = "", limit: int = 800) -> list[dict]:
+        sql, args = "SELECT * FROM ledger WHERE 1=1", []
+        if month:
+            sql += " AND substr(day,1,7)=?"
+            args.append(month)
+        if kind in ("支出", "收入"):
+            sql += " AND kind=?"
+            args.append(kind)
+        sql += " ORDER BY day DESC, id DESC LIMIT ?"
+        args.append(int(limit))
+        return self._run(sql, tuple(args))
+
+    def ledger_summary(self, month: str = "") -> dict:
+        """某个月的收支总览 + 分类汇总。month 空就用本月。"""
+        m = month or _today()[:7]
+        rows = self._run("SELECT kind, amount, category FROM ledger WHERE substr(day,1,7)=?",
+                         (m,))
+        inc = sum(r["amount"] or 0 for r in rows if r["kind"] == "收入")
+        exp = sum(r["amount"] or 0 for r in rows if r["kind"] == "支出")
+        by_out, by_in = {}, {}
+        for r in rows:
+            c = (r["category"] or "其它").strip() or "其它"
+            (by_in if r["kind"] == "收入" else by_out)[c] = \
+                (by_in if r["kind"] == "收入" else by_out).get(c, 0) + (r["amount"] or 0)
+        cat = [{"cat": k, "used": round(v, 2)} for k, v in by_out.items()]
+        cat.sort(key=lambda x: -x["used"])
+        src = [{"cat": k, "used": round(v, 2)} for k, v in by_in.items()]
+        src.sort(key=lambda x: -x["used"])
+        return {"ok": True, "month": m, "income": round(inc, 2), "expense": round(exp, 2),
+                "net": round(inc - exp, 2), "n": len(rows), "by_cat": cat, "by_src": src,
+                "cats": list(self.LIFE_CATS)}
+
+    def ledger_months(self, limit: int = 12) -> dict:
+        """102 收入看板：按月对比（含支出，好算净结余）。"""
+        rows = self._run(
+            "SELECT substr(day,1,7) m, kind, SUM(amount) s, COUNT(*) n FROM ledger "
+            "GROUP BY m, kind ORDER BY m DESC")
+        agg: dict[str, dict] = {}
+        for r in rows:
+            m = r["m"] or "未知"
+            a = agg.setdefault(m, {"month": m, "income": 0.0, "expense": 0.0, "n": 0})
+            if r["kind"] == "收入":
+                a["income"] += r["s"] or 0
+            else:
+                a["expense"] += r["s"] or 0
+            a["n"] += r["n"] or 0
+        out = list(agg.values())[:int(limit)]
+        for a in out:
+            a["income"] = round(a["income"], 2)
+            a["expense"] = round(a["expense"], 2)
+            a["net"] = round(a["income"] - a["expense"], 2)
+        return {"ok": True, "months": out}
+
+    # ---- 96 超支预警 ----
+
+    def budget_limits(self) -> dict:
+        raw = self.kv_get("budgetLimits", "") or ""
+        try:
+            d = json.loads(raw) if raw else {}
+        except (ValueError, TypeError):
+            d = {}
+        return {str(k): float(v) for k, v in d.items() if isinstance(v, (int, float))}
+
+    def budget_limits_save(self, limits: dict) -> dict:
+        clean = {}
+        for k, v in (limits or {}).items():
+            try:
+                f = round(float(v), 2)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                clean[str(k).strip() or "其它"] = f
+        self.kv_set("budgetLimits", json.dumps(clean, ensure_ascii=False))
+        return {"ok": True, "limits": clean}
+
+    def budget_check(self, month: str = "") -> dict:
+        """按分类比对本月支出与阈值。over 里就是超支的。"""
+        m = month or _today()[:7]
+        lim = self.budget_limits()
+        rows = self.ledger_summary(m)["by_cat"]
+        used = {r["cat"]: r["used"] for r in rows}
+        out, over = [], []
+        for c in dict.fromkeys(list(self.LIFE_CATS) + list(used) + list(lim)):
+            u, l = round(used.get(c, 0.0), 2), round(lim.get(c, 0.0), 2)
+            if not u and not l:
+                continue
+            item = {"cat": c, "used": u, "limit": l,
+                    "pct": round(u / l * 100, 1) if l else 0.0,
+                    "over": bool(l and u > l), "left": round(l - u, 2) if l else 0.0}
+            out.append(item)
+            if item["over"]:
+                over.append(item)
+        out.sort(key=lambda x: -x["pct"])
+        return {"ok": True, "month": m, "rows": out, "over": over,
+                "limit_n": len(lim)}
+
+    # ---- 97 设备台账 / 99 充电区 ----
+
+    def devices_list(self) -> list[dict]:
+        rows = self._run("SELECT * FROM devices ORDER BY id DESC")
+        now = datetime.date.today()
+        for r in rows:
+            r["warranty_left"] = self._warranty_days(r.get("bought"), r.get("warranty"), now)
+            r["warranty_end"] = self._warranty_end(r.get("bought"), r.get("warranty"))
+        return rows
+
+    @staticmethod
+    def _warranty_end(bought: str, months) -> str:
+        if not bought or not months:
+            return ""
+        try:
+            d = datetime.date.fromisoformat(str(bought)[:10])
+        except ValueError:
+            return ""
+        y, m = divmod(d.month - 1 + int(months), 12)
+        try:
+            return d.replace(year=d.year + y, month=m + 1).isoformat()
+        except ValueError:                        # 2/29 之类
+            return ""
+
+    @staticmethod
+    def _warranty_days(bought: str, months, today) -> int | None:
+        end = Store._warranty_end(bought, months)
+        if not end:
+            return None
+        try:
+            return (datetime.date.fromisoformat(end) - today).days
+        except ValueError:
+            return None
+
+    def device_save(self, id_: int | None, name: str, kind: str = "", zone: str = "",
+                    bought: str = "", warranty=0, price=0, charge: str = "",
+                    note: str = "") -> dict:
+        if not (name or "").strip():
+            return {"ok": False, "error": "设备名不能空"}
+        ch = charge if charge in self.CHARGE_STATES else ""
+        try:
+            w, p = int(warranty or 0), float(price or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "保修月数/价格填得不对"}
+        args = ((name or "").strip(), (kind or "").strip(), (zone or "").strip(),
+                (bought or "").strip()[:10], w, p, ch, (note or "").strip())
+        if id_:
+            self._run("UPDATE devices SET name=?,kind=?,zone=?,bought=?,warranty=?,price=?,"
+                      "charge=?,note=? WHERE id=?", args + (int(id_),), False)
+            return {"ok": True, "id": int(id_)}
+        cur = self.conn.execute(
+            "INSERT INTO devices (name,kind,zone,bought,warranty,price,charge,note,created) "
+            "VALUES (?,?,?,?,?,?,?,?,?)", args + (time.time(),))
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid}
+
+    def device_charge(self, id_: int, state: str) -> dict:
+        if state not in self.CHARGE_STATES:
+            return {"ok": False, "error": "充电状态不认识"}
+        self._run("UPDATE devices SET charge=? WHERE id=?", (state, int(id_)), False)
+        return {"ok": True, "charge": state}
+
+    def device_del(self, id_: int) -> dict:
+        self._run("DELETE FROM devices WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def charge_board(self) -> dict:
+        """99 充电区：按位置分组看谁在充、谁满了。"""
+        rows = self._run("SELECT * FROM devices WHERE COALESCE(charge,'')<>'' OR "
+                         "COALESCE(zone,'')<>'' ORDER BY zone, id")
+        zones: dict[str, list] = {}
+        for r in rows:
+            zones.setdefault((r.get("zone") or "未分区").strip() or "未分区", []).append(r)
+        return {"ok": True, "zones": [{"zone": k, "items": v} for k, v in zones.items()],
+                "n_charging": sum(1 for r in rows if r.get("charge") == "充电中"),
+                "n_pending": sum(1 for r in rows if r.get("charge") == "待充")}
+
+    # ---- 100 网络拓扑 ----
+
+    def net_list(self) -> list[dict]:
+        rows = self._run("SELECT * FROM net_nodes ORDER BY parent, id")
+        by_parent: dict[int, list] = {}
+        for r in rows:
+            by_parent.setdefault(int(r.get("parent") or 0), []).append(r)
+        out = []
+
+        def walk(pid: int, depth: int):
+            for r in by_parent.get(pid, []):
+                r["depth"] = depth
+                out.append(r)
+                walk(int(r["id"]), depth + 1)
+        walk(0, 0)
+        for r in rows:                            # parent 指向不存在的节点时也得露面
+            if r not in out:
+                r["depth"] = 0
+                out.append(r)
+        return out
+
+    def net_save(self, id_: int | None, name: str, kind: str = "", parent=0,
+                 port: str = "", ip: str = "", note: str = "") -> dict:
+        if not (name or "").strip():
+            return {"ok": False, "error": "名字不能空"}
+        try:
+            p = int(parent or 0)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "上游填得不对"}
+        if id_ and p == int(id_):
+            return {"ok": False, "error": "不能把自己当上游"}
+        args = ((name or "").strip(), (kind or "").strip(), p, (port or "").strip(),
+                (ip or "").strip(), (note or "").strip())
+        if id_:
+            self._run("UPDATE net_nodes SET name=?,kind=?,parent=?,port=?,ip=?,note=? WHERE id=?",
+                      args + (int(id_),), False)
+            return {"ok": True, "id": int(id_)}
+        cur = self.conn.execute(
+            "INSERT INTO net_nodes (name,kind,parent,port,ip,note,created) "
+            "VALUES (?,?,?,?,?,?,?)", args + (time.time(),))
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid}
+
+    def net_del(self, id_: int) -> dict:
+        """删节点时把挂在它下面的也跟着挪到根，别留孤儿。"""
+        self._run("UPDATE net_nodes SET parent=0 WHERE parent=?", (int(id_),), False)
+        self._run("DELETE FROM net_nodes WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    # ---- 101 采购清单 ----
+
+    def wishes_list(self) -> dict:
+        rows = self._run("SELECT * FROM wishes ORDER BY CASE status WHEN '想要' THEN 0 "
+                         "WHEN '比价中' THEN 1 WHEN '已购' THEN 2 ELSE 3 END, priority, id DESC")
+        want = round(sum(r["price"] or 0 for r in rows if r["status"] in ("想要", "比价中")), 2)
+        bought = round(sum(r["price"] or 0 for r in rows if r["status"] == "已购"), 2)
+        return {"ok": True, "rows": rows, "want_total": want, "bought_total": bought,
+                "states": list(self.WISH_STATES)}
+
+    def wish_save(self, id_: int | None, name: str, price=0, shop: str = "", url: str = "",
+                  priority=2, status: str = "想要", note: str = "") -> dict:
+        if not (name or "").strip():
+            return {"ok": False, "error": "名字不能空"}
+        st = status if status in self.WISH_STATES else "想要"
+        try:
+            pr, pi = float(price or 0), int(priority or 2)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "价格/优先级填得不对"}
+        pi = pi if pi in (1, 2, 3) else 2
+        bought_at = _today() if st == "已购" else ""
+        args = ((name or "").strip(), pr, (shop or "").strip(), (url or "").strip(),
+                pi, st, bought_at, (note or "").strip())
+        if id_:
+            old = self._run("SELECT status, bought_at FROM wishes WHERE id=?", (int(id_),))
+            if old and old[0].get("status") == "已购" and st == "已购":
+                args = args[:6] + (old[0].get("bought_at") or bought_at,) + args[7:]
+            self._run("UPDATE wishes SET name=?,price=?,shop=?,url=?,priority=?,status=?,"
+                      "bought_at=?,note=? WHERE id=?", args + (int(id_),), False)
+            return {"ok": True, "id": int(id_)}
+        cur = self.conn.execute(
+            "INSERT INTO wishes (name,price,shop,url,priority,status,bought_at,note,created) "
+            "VALUES (?,?,?,?,?,?,?,?,?)", args + (time.time(),))
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid}
+
+    def wish_buy(self, id_: int, day: str = "") -> dict:
+        """一键标记已购（比价完了直接落账，顺手记一笔支出）。"""
+        day = (day or "").strip() or _today()
+        rows = self._run("SELECT * FROM wishes WHERE id=?", (int(id_),))
+        if not rows:
+            return {"ok": False, "error": "这条不在清单里"}
+        w = rows[0]
+        self._run("UPDATE wishes SET status='已购', bought_at=? WHERE id=?", (day, int(id_)), False)
+        r = self.ledger_add(day, "支出", w.get("price") or 0, "购物",
+                            (w.get("name") or "") + "（采购）")
+        return {"ok": True, "ledger": r, "over": r.get("over", [])}
+
+    def wish_del(self, id_: int) -> dict:
+        self._run("DELETE FROM wishes WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    # ---- 104 体重简记 ----
+
+    def weight_list(self, limit: int = 180) -> list[dict]:
+        return self._run("SELECT * FROM weights ORDER BY day DESC LIMIT ?", (int(limit),))
+
+    def weight_add(self, day: str, kg, note: str = "") -> dict:
+        day = (day or "").strip() or _today()
+        try:
+            v = round(float(kg or 0), 2)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "体重填得不对"}
+        if not 20 <= v <= 300:
+            return {"ok": False, "error": "这个数不像体重"}
+        old = self._run("SELECT id FROM weights WHERE day=?", (day,))
+        if old:                                   # 同一天再记就覆盖，别留两条
+            self._run("UPDATE weights SET kg=?, note=?, created=? WHERE id=?",
+                      (v, (note or "").strip(), time.time(), int(old[0]["id"])), False)
+            return {"ok": True, "id": int(old[0]["id"]), "replaced": True}
+        cur = self.conn.execute(
+            "INSERT INTO weights (day,kg,note,created) VALUES (?,?,?,?)",
+            (day, v, (note or "").strip(), time.time()))
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid, "replaced": False}
+
+    def weight_del(self, id_: int) -> dict:
+        self._run("DELETE FROM weights WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def weight_stats(self) -> dict:
+        rows = self._run("SELECT day, kg FROM weights ORDER BY day")   # 升序，给曲线
+        if not rows:
+            return {"ok": True, "n": 0, "series": []}
+        first, last = rows[0], rows[-1]
+        mn = min(r["kg"] for r in rows)
+        mx = max(r["kg"] for r in rows)
+        avg7 = sum(r["kg"] for r in rows[-7:]) / len(rows[-7:])
+        return {"ok": True, "n": len(rows), "series": rows,
+                "first": first, "last": last, "delta": round(last["kg"] - first["kg"], 2),
+                "min": mn, "max": mx, "avg7": round(avg7, 2)}
+
+    # ---- 老数据搬家：lists 表的 devices/budget/income 迁到新表 ----
+
+    def life_migrate(self) -> dict:
+        if self.kv_get("lifeMigrated", "") == "1":
+            return {"ok": True, "skipped": True, "n": 0}
+        n = 0
+        rows = self._run("SELECT * FROM lists")
+        for r in rows:
+            try:
+                f = json.loads(r.get("fields") or "{}")
+            except (ValueError, TypeError):
+                f = {}
+            k = r.get("key")
+            if k == "devices" and f.get("name"):
+                self.device_save(None, f.get("name", ""), "", f.get("loc", ""),
+                                 "", 0, 0, "", (f.get("power", "") + " " + f.get("note", "")).strip())
+            elif k == "budget" and f.get("item"):
+                self.wish_save(None, f.get("item", ""), f.get("plan") or 0, "", "", 2,
+                               "已购" if f.get("actual") else "想要", f.get("note", ""))
+            elif k == "income" and f.get("src"):
+                self.ledger_add(f.get("date") or _today(), "收入", f.get("amt") or 0,
+                                f.get("src", ""), f.get("note", ""))
+            else:
+                continue
+            n += 1
+        self.kv_set("lifeMigrated", "1")
+        return {"ok": True, "skipped": False, "n": n}

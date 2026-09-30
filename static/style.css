@@ -2356,3 +2356,26 @@ body.light ::-webkit-scrollbar-thumb {
 }
 .kb-node > div { flex-basis: 100%; }
 .kb-links { font-size: 12.5px; }
+
+/* ---- K 域 生活（95-104）---- */
+.lg-lim {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 0;
+}
+.lg-lim-n { flex: 0 0 96px; font-size: 12.5px; color: var(--ink-2); }
+.lg-lim input {
+  width: 110px; height: 28px; padding: 0 8px; font-size: 12px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: var(--ink);
+}
+.bd-month {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 0; border-bottom: 1px solid var(--line-soft);
+}
+.bd-month .bd-m {
+  flex: 0 0 74px; font-family: var(--mono); font-size: 12.5px; color: var(--ink-2);
+}
+.bd-month .bd-n { flex: 0 0 auto; font-size: 11.5px; }
+.czone { margin-bottom: 10px; }
+.czone-t { font-size: 12.5px; color: var(--ink-2); margin-bottom: 4px; }
+.czone-i { display: flex; gap: 6px; flex-wrap: wrap; }
