@@ -134,7 +134,7 @@ window.WB = {
 // 注：AI（问一问）和文档页都不再单独占模块位，它们是 OpenClaw 页下的子标签，
 // 由 mod-claw.js 自己动态 import。别把它们加回 MODULES。
 const [mHome, mTasks, mFiles, mClaw, mSkills, mCal, mMail, mProjects, mNotes, mKb, mSystem, mSettings, mLife, mRoom, mMeet,
-  mPomo, mHabits, mClip, mReminders, mDaylog, mTools, mFeatures] =
+  mPomo, mHabits, mClip, mReminders, mDaylog, mTools, mSystools, mFeatures] =
   await Promise.all([
     import('./mod-home.js'),
     import('./mod-tasks.js'),
@@ -157,6 +157,7 @@ const [mHome, mTasks, mFiles, mClaw, mSkills, mCal, mMail, mProjects, mNotes, mK
     import('./mod-reminders.js'),
     import('./mod-daylog.js'),
     import('./mod-tools.js'),
+    import('./mod-systools.js'),
     import('./mod-features.js'),
   ]);
 
@@ -165,6 +166,7 @@ const MODULES = [
   mMail.default, mProjects.default, mNotes.default, mKb.default, mSystem.default,
   mSettings.default, mLife.default, mRoom.default,
   mPomo.default, mHabits.default, mClip.default, mReminders.default, mDaylog.default, mTools.default,
+  mSystools.default,
   mFeatures.default,
 ];
 

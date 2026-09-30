@@ -1,4 +1,5 @@
-/* 系统：CPU / 内存 / 磁盘 / 进程 + 四个工具（剪贴板历史 / 截图标注 / 定时提醒 / 内置终端）。
+/* 系统：CPU / 内存 / 磁盘 / 进程（109 实时曲线）+ 四个工具
+ * （106 剪贴板历史 / 107 截图标注 / 定时提醒 / 105 内置终端多标签）。
  * 工具都是本地功能，不涉及外部账号。
  */
 
@@ -98,7 +99,7 @@ class TermEmu {
       if (c === '\n') { this.nl(); i++; continue; }
       if (c === '\b') { if (this.cx > 0) this.cx--; i++; continue; }
       if (c === '\x0c' || c === '\x0b') { this.clearScreen(); i++; continue; }
-      if (c < ' ' || c === ' ') { i++; continue; }
+      if (c < ' ' || c === ' ') { i++; continue; }
       this.put(c); i++;
     }
   }
@@ -135,17 +136,22 @@ export default {
   timer: null,
   _remTimer: null,
   _remFired: null,
+  _hist: null,
+  _histTimer: null,
+  _auto: true,
 
   mount(el) {
     this.el = el;
     el.innerHTML = `
       <div class="bar" style="padding-top:0">
         <button class="btn" id="btnRefresh" style="height:30px;padding:0 12px;font-size:12px">刷新</button>
+        <label class="note" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="sysAuto" checked> 实时曲线</label>
         <span id="sysState" style="font-size:12px;color:var(--ink-2)"></span>
       </div>
       <div class="stack">
         <div class="panel">
           <h3>资源</h3>
+          <div id="sysCharts"></div>
           <div id="sysStats" class="note">读取中…</div>
         </div>
         <div class="panel">
@@ -165,18 +171,24 @@ export default {
 
         <div class="panel">
           <h3>截图标注</h3>
-          <div class="note" style="margin-bottom:8px">选一张图，在图上画矩形 / 箭头 / 文字，下载标注图。</div>
+          <div class="note" style="margin-bottom:8px">选一张图，在图上画矩形 / 箭头 / 文字 / 自由线；「取色」点一下就把那个像素的颜色取出来。</div>
           <input type="file" id="annoFile" accept="image/*">
-          <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap">
+          <div style="margin:8px 0;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
             <button class="btn slim" data-tool="rect">矩形</button>
             <button class="btn slim" data-tool="arrow">箭头</button>
             <button class="btn slim" data-tool="text">文字</button>
             <button class="btn slim" data-tool="free">自由线</button>
+            <button class="btn slim" data-tool="color">取色</button>
+            <label class="note" style="display:flex;align-items:center;gap:4px">颜色
+              <input type="color" id="annoColor" value="#e23b3b" style="width:34px;height:24px;padding:0;border:1px solid var(--line-soft);border-radius:4px;background:none"></label>
+            <label class="note" style="display:flex;align-items:center;gap:4px">粗细
+              <select id="annoW" style="height:26px"><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option><option value="8">8</option></select></label>
             <button class="btn slim" id="annoUndo">撤销</button>
             <button class="btn slim" id="annoClear">清空</button>
             <button class="btn slim primary" id="annoDown">下载 PNG</button>
             <span class="note" id="annoTool">当前：矩形</span>
           </div>
+          <div id="annoPick" class="note" style="margin-bottom:6px"></div>
           <div style="overflow:auto;max-height:520px;border:1px solid var(--line-soft);border-radius:8px">
             <canvas id="annoCanvas" style="display:block;cursor:crosshair"></canvas>
           </div>
@@ -184,7 +196,7 @@ export default {
 
         <div class="panel">
           <h3>定时提醒</h3>
-          <div class="note" style="margin-bottom:8px">到点后工作台弹提示（需本页开着）。本机可用，不依赖外部日历。</div>
+          <div class="note" style="margin-bottom:8px">到点后工作台弹提示（需本页开着）。本机可用，不依赖外部日历。要「到点跑命令/OpenClaw」用「系统工具」页。</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <input type="datetime-local" id="remAt" style="height:34px">
             <input id="remText" placeholder="提醒内容" style="flex:1;min-width:160px;height:34px">
@@ -195,7 +207,8 @@ export default {
 
         <div class="panel">
           <h3>内置终端 <span id="termMode" class="tag"></span></h3>
-          <div class="note" style="margin-bottom:8px">⚠️ 在<strong>你本机</strong>执行命令，权限等同你自己。别跑不认识的命令。点终端区域即可输入。</div>
+          <div class="note" style="margin-bottom:8px">⚠️ 在<strong>你本机</strong>执行命令，权限等同你自己。别跑不认识的命令。点终端区域即可输入。可以开多个标签，各自一个 PowerShell 会话。</div>
+          <div id="termTabs" class="term-tabs"></div>
           <div style="position:relative">
             <pre id="termOut" tabindex="0" style="background:#0c0c0c;color:#e5e5e5;border-radius:8px;padding:10px;max-height:300px;min-height:120px;overflow:auto;font-size:12.5px;line-height:1.45;white-space:pre;margin:0 0 8px;outline:none"></pre>
             <textarea id="termCap" aria-hidden="true" spellcheck="false" autocomplete="off"
@@ -211,6 +224,10 @@ export default {
       </div>`;
 
     el.querySelector('#btnRefresh').onclick = () => this.load();
+    el.querySelector('#sysAuto').onchange = (e) => {
+      this._auto = e.target.checked;
+      if (this._auto) this.startAuto(); else this.stopAuto();
+    };
     el.querySelector('#procList').addEventListener('click', async (e) => {
       const k = e.target.closest('.kill');
       if (!k) return;
@@ -224,13 +241,42 @@ export default {
     this.bindRem();
     this.bindTerm();
 
+    this._hist = { cpu: [], mem: [] };
     this.load();
     this.loadClip();
     this.loadRem();
     this.startRemPoll();
+    this.startAuto();
   },
 
-  /* ---------- 资源 ---------- */
+  /* ---------- 109 资源 + 实时曲线 ---------- */
+  startAuto() {
+    if (this._histTimer) return;
+    this._histTimer = setInterval(() => { if (this._auto) this.load(); }, 3000);
+  },
+  stopAuto() {
+    if (this._histTimer) { clearInterval(this._histTimer); this._histTimer = null; }
+  },
+
+  _spark(vals, color, label, unit) {
+    const w = 300, h = 46, n = Math.max(2, vals.length);
+    const px = (i) => (i * (w - 2) / (n - 1)) + 1;
+    const py = (v) => h - 2 - (Math.max(0, Math.min(100, v)) / 100) * (h - 8);
+    const pts = vals.map((v, i) => `${px(i).toFixed(1)},${py(v).toFixed(1)}`).join(' ');
+    const area = vals.length > 1
+      ? `1,${h - 2} ${pts} ${px(vals.length - 1).toFixed(1)},${h - 2}` : '';
+    const cur = vals.length ? Math.round(vals[vals.length - 1]) : 0;
+    const max = vals.length ? Math.round(Math.max(...vals)) : 0;
+    return `<div class="sysspark">
+      <div class="sysspark-h"><span>${label}</span>
+        <span class="note">现在 ${cur}${unit} · 峰值 ${max}${unit}</span></div>
+      <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" class="sysspark-svg">
+        ${area ? `<polygon points="${area}" fill="${color}" opacity=".14"></polygon>` : ''}
+        ${vals.length > 1 ? `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"></polyline>` : ''}
+      </svg>
+    </div>`;
+  },
+
   async load() {
     const el = this.el;
     el.querySelector('#sysState').textContent = '采样中…';
@@ -247,6 +293,16 @@ export default {
         </div>
       </div>`;
     };
+    // 曲线只留最近 60 个采样点
+    if (this._hist) {
+      this._hist.cpu.push(d.cpu || 0);
+      this._hist.mem.push(d.mem && d.mem.total ? d.mem.used * 100 / d.mem.total : 0);
+      if (this._hist.cpu.length > 60) this._hist.cpu.shift();
+      if (this._hist.mem.length > 60) this._hist.mem.shift();
+      el.querySelector('#sysCharts').innerHTML =
+        this._spark(this._hist.cpu, '#2472c8', 'CPU', '%') +
+        this._spark(this._hist.mem, '#0dbc79', '内存', '%');
+    }
     let h = bar('内存', d.mem.used, d.mem.total);
     h += `<div style="font-size:12.5px;margin-bottom:12px">CPU ${d.cpu}% · ${d.cores} 核</div>`;
     (d.disks || []).forEach((k) => { h += bar(`磁盘 ${k.root}`, k.used, k.total); });
@@ -258,10 +314,10 @@ export default {
         <button class="kill" data-pid="${p.pid}" data-name="${esc(p.name)}"
           style="border:1px solid var(--line-strong);background:transparent;border-radius:6px;font-size:11px;padding:2px 8px;color:var(--ink-2);cursor:pointer">结束</button>
       </div>`).join('');
-    el.querySelector('#sysState').textContent = '刚更新';
+    el.querySelector('#sysState').textContent = '刚更新 ' + new Date().toLocaleTimeString();
   },
 
-  /* ---------- 剪贴板历史 ---------- */
+  /* ---------- 剪贴板历史（简版；完整搜索/置顶在「剪贴板」页） ---------- */
   bindClip() {
     if (!window.__clipBound) {
       window.__clipBound = true;
@@ -302,22 +358,27 @@ export default {
     const rows = (d.rows || []).slice(0, 100);
     if (!rows.length) { box.innerHTML = '<div class="note">还没有记录</div>'; return; }
     box.innerHTML = rows.map((r) => `
-      <div class="lrow"><div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.text)}">${esc(r.text)}</div>
+      <div class="lrow">${r.pinned ? '<span title="已置顶">📌</span>' : ''}<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.text)}">${esc(r.text)}</div>
       <button class="btn slim clip-copy" data-text="${esc(r.text).replace(/"/g, '&quot;')}">复制</button>
       <button class="clip-del x" data-id="${r.id}" style="opacity:1;position:static;margin-left:6px">×</button></div>`).join('');
   },
 
-  /* ---------- 截图标注 ---------- */
+  /* ---------- 107 截图标注（含取色） ---------- */
   bindAnno() {
     const cv = this.el.querySelector('#annoCanvas');
     const ctx = cv.getContext('2d');
-    this.anno = { cv, ctx, img: null, tool: 'rect', shapes: [], drawing: null, sx: 0, sy: 0 };
+    this.anno = {
+      cv, ctx, img: null, tool: 'rect', shapes: [], drawing: null, sx: 0, sy: 0,
+      color: '#e23b3b', width: 3,
+    };
     this.el.querySelectorAll('[data-tool]').forEach((b) => {
       b.onclick = () => {
         this.anno.tool = b.dataset.tool;
         this.el.querySelector('#annoTool').textContent = '当前：' + b.textContent;
       };
     });
+    this.el.querySelector('#annoColor').oninput = (e) => { this.anno.color = e.target.value; };
+    this.el.querySelector('#annoW').onchange = (e) => { this.anno.width = +e.target.value; };
     this.el.querySelector('#annoFile').onchange = (e) => this.annoLoad(e.target.files[0]);
     this.el.querySelector('#annoUndo').onclick = () => { this.anno.shapes.pop(); this.annoRedraw(); };
     this.el.querySelector('#annoClear').onclick = () => { this.anno.shapes = []; this.annoRedraw(); };
@@ -356,12 +417,34 @@ export default {
     if (!this.anno.img) return;
     const p = this.annoPos(e);
     const t = this.anno.tool;
-    if (t === 'text') {
-      const s = prompt('输入文字：');
-      if (s) { this.anno.shapes.push({ type: 'text', x: p.x, y: p.y, text: s }); this.annoRedraw(); }
+    if (t === 'color') {                            // 取色：读该像素的 RGB
+      const x = Math.max(0, Math.min(this.anno.cv.width - 1, Math.round(p.x)));
+      const y = Math.max(0, Math.min(this.anno.cv.height - 1, Math.round(p.y)));
+      try {
+        const d = this.anno.ctx.getImageData(x, y, 1, 1).data;
+        const hex = '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+        this.anno.color = hex;
+        this.el.querySelector('#annoColor').value = hex;
+        const box = this.el.querySelector('#annoPick');
+        box.innerHTML = `<span style="display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;border:1px solid var(--line-soft);background:${hex}"></span>
+          取到 ${hex} · rgb(${d[0]}, ${d[1]}, ${d[2]}) · 已设为当前颜色
+          <button class="btn slim" id="annoPickCopy" style="margin-left:6px">复制色值</button>`;
+        const cbtn = box.querySelector('#annoPickCopy');
+        if (cbtn) cbtn.onclick = async () => {
+          try { await navigator.clipboard.writeText(hex); toast('已复制 ' + hex); } catch (_) { toast(hex); }
+        };
+      } catch (_) { toast('这张图取不了色（跨域画布）'); }
       return;
     }
-    this.anno.drawing = { type: t, x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+    if (t === 'text') {
+      const s = prompt('输入文字：');
+      if (s) {
+        this.anno.shapes.push({ type: 'text', x: p.x, y: p.y, text: s, color: this.anno.color, width: this.anno.width });
+        this.annoRedraw();
+      }
+      return;
+    }
+    this.anno.drawing = { type: t, x1: p.x, y1: p.y, x2: p.x, y2: p.y, color: this.anno.color, width: this.anno.width };
   },
   annoMove(e) {
     if (!this.anno.drawing) return;
@@ -376,15 +459,17 @@ export default {
     const { ctx, cv, img, shapes, drawing } = this.anno;
     ctx.clearRect(0, 0, cv.width, cv.height);
     if (img) ctx.drawImage(img, 0, 0);
-    ctx.lineWidth = 3; ctx.strokeStyle = '#e23b3b'; ctx.fillStyle = '#e23b3b';
     ctx.font = '20px sans-serif';
     const all = drawing ? shapes.concat([drawing]) : shapes;
     for (const s of all) {
+      ctx.lineWidth = s.width || 3;
+      ctx.strokeStyle = s.color || '#e23b3b';
+      ctx.fillStyle = s.color || '#e23b3b';
       if (s.type === 'rect') ctx.strokeRect(s.x1, s.y1, s.x2 - s.x1, s.y2 - s.y1);
       else if (s.type === 'free' || s.type === 'arrow') {
         ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
         if (s.type === 'arrow') {
-          const a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1), L = 12;
+          const a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1), L = 12 + (s.width || 3);
           ctx.beginPath();
           ctx.moveTo(s.x2, s.y2);
           ctx.lineTo(s.x2 - L * Math.cos(a - 0.4), s.y2 - L * Math.sin(a - 0.4));
@@ -450,27 +535,140 @@ export default {
     }, 15000);
   },
 
-  /* ---------- 内置终端 ---------- */
+  /* ---------- 105 内置终端（多标签，每个标签一个 PTY 会话） ---------- */
   bindTerm() {
+    this.tabs = []; this.activeSid = null; this.tabSeq = 0;
     this.termHist = []; this.termI = 0;
-    this.termES = null; this.emu = null; this.termMode = 'run';
     const out = this.el.querySelector('#termOut');
     const cap = this.el.querySelector('#termCap');
     const inp = this.el.querySelector('#termIn');
     const bar = this.el.querySelector('#termBar');
     const restart = this.el.querySelector('#termRestart');
     const modeTag = this.el.querySelector('#termMode');
+    const tabsBox = this.el.querySelector('#termTabs');
 
     const computeSize = () => ({
       cols: Math.max(20, Math.floor(out.clientWidth / 7.4) || 120),
       rows: Math.max(6, Math.floor(out.clientHeight / 18) || 30),
     });
+    const active = () => this.tabs.find((t) => t.sid === this.activeSid) || null;
 
-    // 非交互兜底：输入 + 运行按钮
+    // 用 rAF 节流重渲染：PTY 输出常是一连串小帧，逐帧整屏重绘会卡，合到下一帧只画一次
+    let raf = null;
+    const renderOut = (tab) => {
+      if (!tab || tab.sid !== this.activeSid) return;
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = null;
+        const t = active();
+        if (t && t.emu) { out.innerHTML = t.emu.render(); out.scrollTop = out.scrollHeight; }
+      });
+    };
+
+    const paintTabs = () => {
+      tabsBox.innerHTML = this.tabs.map((t) => `
+        <span class="term-tab${t.sid === this.activeSid ? ' on' : ''}" data-sid="${t.sid}">
+          <b class="term-pick" data-sid="${t.sid}">${esc(t.title)}</b>
+          <i class="term-kill" data-sid="${t.sid}" title="关掉这个标签">×</i>
+        </span>`).join('') + '<button class="btn slim" id="termNew" title="新标签">＋</button>';
+      tabsBox.querySelectorAll('.term-pick').forEach((b) => { b.onclick = () => switchTab(b.dataset.sid); });
+      tabsBox.querySelectorAll('.term-kill').forEach((b) => {
+        b.onclick = (e) => { e.stopPropagation(); closeTab(b.dataset.sid); };
+      });
+      const nb = tabsBox.querySelector('#termNew');
+      if (nb) nb.onclick = () => openTab();
+    };
+
+    const syncUi = () => {
+      const t = active();
+      const interactive = !!(t && t.mode === 'interactive');
+      modeTag.textContent = t ? (interactive ? '交互' : '非交互') : '';
+      out.innerHTML = (t && t.emu) ? t.emu.render() : '';
+      bar.style.display = 'flex';
+      inp.style.display = interactive ? 'none' : '';
+      restart.style.display = t ? '' : 'none';
+      out.scrollTop = out.scrollHeight;
+      if (interactive) cap.focus();
+    };
+
+    const openStream = (t) => {
+      if (t.es) return;
+      const es = new EventSource('/api/term/out?sid=' + encodeURIComponent(t.sid));
+      t.es = es;
+      es.onmessage = (e) => {
+        try { t.emu.feed(atob(e.data)); renderOut(t); } catch (_) { /* 忽略坏帧 */ }
+      };
+      es.addEventListener('closed', () => {
+        if (t.emu) t.emu.feed('\r\n[终端已关闭 —— 点「重启」重开这个标签]\r\n');
+        renderOut(t);
+        t.es = null;
+        try { es.close(); } catch (_) {}
+      });
+      es.onerror = () => { /* 断线由 closed 事件或重连处理 */ };
+    };
+
+    const startTab = async (t) => {
+      const sz = computeSize();
+      const r = await post('/api/term/start', { sid: t.sid, cols: sz.cols, rows: sz.rows });
+      if (!r || !r.ok) {   // 本机不支持 ConPTY，退回非交互模式
+        t.mode = 'run'; t.emu = null;
+        if (t.sid === this.activeSid) syncUi();
+        return;
+      }
+      t.mode = 'interactive';
+      t.emu = new TermEmu(sz.cols);
+      if (t.es) { try { t.es.close(); } catch (_) {} t.es = null; }
+      openStream(t);
+      if (t.sid === this.activeSid) syncUi();
+    };
+
+    const openTab = () => {
+      this.tabSeq += 1;
+      const t = {
+        sid: 't' + Date.now().toString(36) + this.tabSeq,
+        title: '终端 ' + this.tabSeq, mode: 'run', emu: null, es: null,
+      };
+      this.tabs.push(t);
+      this.activeSid = t.sid;
+      paintTabs(); syncUi();
+      startTab(t);
+    };
+
+    const switchTab = (sid) => {
+      const t = this.tabs.find((x) => x.sid === sid);
+      if (!t) return;
+      this.activeSid = sid;
+      paintTabs(); syncUi();
+      if (t.mode === 'interactive' && !t.es) startTab(t);
+    };
+
+    const closeTab = (sid) => {
+      const i = this.tabs.findIndex((x) => x.sid === sid);
+      if (i < 0) return;
+      const t = this.tabs[i];
+      if (t.es) { try { t.es.close(); } catch (_) {} t.es = null; }
+      post('/api/term/close', { sid }).catch(() => {});
+      this.tabs.splice(i, 1);
+      if (this.activeSid === sid) {
+        const nx = this.tabs[Math.min(i, this.tabs.length - 1)];
+        this.activeSid = nx ? nx.sid : null;
+      }
+      paintTabs();
+      if (!this.tabs.length) { openTab(); return; }
+      syncUi();
+    };
+
+    // 非交互兜底：输入 + 运行按钮（也用于交互模式下一键送命令）
     const run = async () => {
       const cmd = inp.value;
       if (!cmd.trim()) return;
       this.termHist.push(cmd); this.termI = this.termHist.length;
+      const t = active();
+      if (t && t.mode === 'interactive') {
+        await post('/api/term/in', { sid: t.sid, data: cmd + '\r' });
+        inp.value = '';
+        return;
+      }
       out.textContent += '$ ' + cmd + '\n';
       const r = await post('/api/term/run', { cmd });
       if (!r.ok) out.textContent += (r.error || '执行失败') + '\n';
@@ -483,61 +681,15 @@ export default {
       inp.value = '';
     };
 
-    // 用 rAF 节流重渲染：PTY 输出常是一连串小帧，逐帧整屏重绘会卡，合到下一帧只画一次
-    let raf = null;
-    const renderOut = () => {
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = null;
-        if (this.emu) { out.innerHTML = this.emu.render(); out.scrollTop = out.scrollHeight; }
-      });
-    };
-
-    const openInteractive = () => {
-      const es = new EventSource('/api/term/out');
-      this.termES = es;
-      es.onmessage = (e) => {
-        try { this.emu.feed(atob(e.data)); renderOut(); }
-        catch (_) { /* 忽略坏帧 */ }
-      };
-      es.addEventListener('closed', () => {
-        this.emu.feed('\r\n[终端已关闭 —— 点「重启」或切走再回来恢复]\r\n');
-        renderOut();
-        this.termES = null;
-        try { es.close(); } catch (_) {}
-      });
-      es.onerror = () => { /* 断线由 closed 事件或重连处理 */ };
-    };
-
-    const startInteractive = async () => {
-      const sz = computeSize();
-      const r = await post('/api/term/start', sz);
-      if (!r.ok) { // 本机不支持 ConPTY，退回非交互模式
-        this.termMode = 'run';
-        modeTag.textContent = '非交互';
-        modeTag.title = r.error || '';
-        bar.style.display = 'flex';
-        inp.style.display = '';
-        restart.style.display = 'none';
-        return;
-      }
-      this.termMode = 'interactive';
-      modeTag.textContent = '交互';
-      // 交互模式下隐藏明文输入框，只留「重启」便于断线后重连
-      bar.style.display = 'flex';
-      inp.style.display = 'none';
-      restart.style.display = '';
-      this.emu = new TermEmu(sz.cols);
-      openInteractive();
-      cap.focus();
-    };
-
     restart.onclick = () => {
-      if (this.termES) { try { this.termES.close(); } catch (_) {} this.termES = null; }
-      startInteractive();
+      const t = active();
+      if (!t) return;
+      if (t.es) { try { t.es.close(); } catch (_) {} t.es = null; }
+      t.emu = null;
+      startTab(t);
     };
 
-    // 交互模式：在终端区直接敲键盘，把字符/VT 序列喂给 PTY
+    // 交互模式：在终端区直接敲键盘，把字符/VT 序列喂给当前标签的 PTY
     const keyToSeq = (e) => {
       if (e.key === 'Enter') return '\r';
       if (e.key === 'Backspace') return '\x7f';
@@ -557,41 +709,47 @@ export default {
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) return e.key;
       return null;
     };
+    const live = () => {
+      const t = active();
+      return (t && t.mode === 'interactive' && t.es) ? t : null;
+    };
     // 交互模式：在透明捕获层（textarea）上敲键盘 —— IME 中文也能输入，且有真实光标。
     // 控制键转 VT 序列发给 PTY；正在组字的 IME 让给 compositionend 处理，避免重复/错位。
     cap.addEventListener('keydown', (e) => {
-      if (this.termMode !== 'interactive' || !this.termES) return;
+      const t = live();
+      if (!t) return;
       if (e.isComposing || e.key === 'Process') return;
       const s = keyToSeq(e);
-      if (s !== null) { e.preventDefault(); post('/api/term/in', { data: s }); }
+      if (s !== null) { e.preventDefault(); post('/api/term/in', { sid: t.sid, data: s }); }
     });
     cap.addEventListener('compositionend', (e) => {
-      if (this.termMode !== 'interactive' || !this.termES) return;
-      if (e.data) post('/api/term/in', { data: e.data });
+      const t = live();
+      if (!t) return;
+      if (e.data) post('/api/term/in', { sid: t.sid, data: e.data });
       cap.value = '';
     });
     // 非 IME 的可打印字符会落进 textarea（preventDefault 已拦，但兜底清掉，防止堆积）
     cap.addEventListener('input', () => { if (cap.value && !cap.isComposing) cap.value = ''; });
-    cap.addEventListener('click', () => { if (this.termMode === 'interactive') cap.focus(); });
+    cap.addEventListener('click', () => { if (live()) cap.focus(); });
     // 粘贴：直接把剪贴板文字送进 PTY（Ctrl+V 也走这里）
     cap.addEventListener('paste', (e) => {
-      if (this.termMode !== 'interactive' || !this.termES) return;
+      const t = live();
+      if (!t) return;
       const text = (e.clipboardData || window.clipboardData).getData('text');
-      if (text) { e.preventDefault(); post('/api/term/in', { data: text }); }
+      if (text) { e.preventDefault(); post('/api/term/in', { sid: t.sid, data: text }); }
     });
 
-    // 尺寸变化同步给 PTY（最佳努力）
+    // 尺寸变化同步给当前标签的 PTY（最佳努力）
     if (typeof ResizeObserver !== 'undefined') {
       this._termRO = new ResizeObserver(() => {
-        if (this.termMode === 'interactive') {
-          const sz = computeSize();
-          post('/api/term/resize', sz);
-        }
+        const t = live();
+        if (t) post('/api/term/resize', { sid: t.sid, ...computeSize() });
       });
       this._termRO.observe(out);
     }
 
-    this.termStartInteractive = startInteractive;
+    this._startTab = startTab;
+    this._attachTab = (t) => { if (t && t.mode === 'interactive') openStream(t); };
     this.el.querySelector('#termRun').onclick = run;
     inp.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); run(); }
@@ -599,19 +757,24 @@ export default {
       else if (e.key === 'ArrowDown') { if (this.termI < this.termHist.length) { this.termI++; inp.value = this.termHist[this.termI] || ''; } }
     });
 
-    // 首次进入：尝试交互模式
-    startInteractive();
+    // 首个标签
+    openTab();
   },
 
   onShow() {
     this.load(); this.loadClip(); this.loadRem();
-    // 交互会话断了就重连（切走再回来）
-    if (this.termMode === 'interactive' && !this.termES && this.termStartInteractive) {
-      this.termStartInteractive();
+    // 切走再回来：会话还活着就重新挂上输出流，别把 shell 杀了
+    const t = (this.tabs || []).find((x) => x.sid === this.activeSid);
+    if (t && this._attachTab) {
+      if (t.mode === 'interactive' && !t.es) this._attachTab(t);
+      else if (t.mode === 'run' && this._startTab && !t.emu) this._startTab(t);
     }
   },
 
   commands() {
-    return [{ title: '刷新系统资源', hint: '系统', run: () => this.load() }];
+    return [
+      { title: '刷新系统资源', hint: '系统', run: () => this.load() },
+      { title: '开一个新终端标签', hint: '系统', run: () => { const b = this.el.querySelector('#termNew'); if (b) b.click(); } },
+    ];
   },
 };

@@ -405,6 +405,27 @@ def _enabled_connectors() -> list[dict]:
             if c.get("enabled", True) and (c.get("token") or c.get("url"))]
 
 
+def _push_all(title: str, content: str) -> dict:
+    """把一条内容推到所有启用的连接器，逐个记推送日志。"""
+    conns = _enabled_connectors()
+    sent = 0
+    for c in conns:
+        try:
+            res = integrations.connector_push(c, title, content)
+            good = bool(res.get("ok"))
+            sent += 1 if good else 0
+            STORE.connector_push_log((c.get("type") or ""),
+                                     (c.get("name") or c.get("id") or ""),
+                                     title, good, res.get("error") or res.get("msg") or "")
+        except Exception as e:  # noqa: BLE001
+            try:
+                STORE.connector_push_log((c.get("type") or ""), (c.get("name") or ""),
+                                         title, False, f"{type(e).__name__}: {e}")
+            except Exception:  # noqa: BLE001
+                pass
+    return {"ok": True, "n": len(conns), "sent": sent}
+
+
 def _rem_push_once() -> int:
     """75 第二通道：到点的提醒除了桌面通知，再往连接器推一份。
 
@@ -600,6 +621,168 @@ def _claw_run_with_retry(task: str, ctx: str, timeout: int, agent: str = "",
     r2["retried"] = True
     r2["first_error"] = (r.get("error") or "")[:300]
     return r2
+
+
+# ---------------- L 域：系统工具（105-114）----------------
+
+def _ports_used() -> list[dict]:
+    """111 端口占用：netstat -ano 取 LISTENING/UDP，tasklist 把 PID 换成进程名。"""
+    try:
+        r = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
+                           timeout=20, errors="replace")
+    except Exception:  # noqa: BLE001
+        return []
+    names: dict[str, str] = {}
+    try:
+        t = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+                           text=True, timeout=20, errors="replace")
+        for line in t.stdout.splitlines():
+            parts = [x.strip('"') for x in line.split('","')]
+            if len(parts) >= 2:
+                names[parts[1]] = parts[0]
+    except Exception:  # noqa: BLE001
+        pass
+    seen, rows = set(), []
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) < 4:
+            continue
+        proto = f[0].upper()
+        if proto not in ("TCP", "UDP"):
+            continue
+        state = f[3].upper() if proto == "TCP" and len(f) >= 5 else ""
+        if proto == "TCP" and state != "LISTENING":
+            continue
+        local, pid = f[1], f[-1]
+        port = local.rsplit(":", 1)[-1] if ":" in local else local
+        if not port.isdigit():
+            continue
+        key = (proto, port, pid)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"proto": proto, "port": int(port), "addr": local,
+                     "pid": int(pid) if pid.isdigit() else 0,
+                     "name": names.get(pid, ""), "state": state or "-"})
+    rows.sort(key=lambda x: x["port"])
+    return rows[:400]
+
+
+CLEAN_HINT_EXT = (".exe", ".msi", ".zip", ".7z", ".rar", ".iso", ".dmg", ".pkg",
+                  ".cab", ".tmp", ".old", ".bak", ".log")
+CLEAN_DIRS = ("%TEMP%", "%LOCALAPPDATA%\\Temp", "%USERPROFILE%\\Downloads")
+
+
+def _cleanup_scan(min_mb: int = 100, days: int = 30, limit: int = 80) -> dict:
+    """112 清理建议：扫临时/下载目录里的大文件与旧安装包。**只列不删**。"""
+    import glob as _glob
+    min_size = max(1, min_mb) * 1024 * 1024
+    cutoff = time.time() - max(1, days) * 86400
+    hits, dirs = [], []
+    for d in CLEAN_DIRS:
+        p = os.path.expandvars(d)
+        if not p or not os.path.isdir(p):
+            continue
+        dirs.append(p)
+        for fp in _glob.glob(os.path.join(p, "**", "*"), recursive=True):
+            try:
+                if not os.path.isfile(fp):
+                    continue
+                st = os.stat(fp)
+            except OSError:
+                continue
+            ext = os.path.splitext(fp)[1].lower()
+            big = st.st_size >= min_size
+            old_pkg = ext in CLEAN_HINT_EXT and st.st_mtime < cutoff
+            if not (big or old_pkg):
+                continue
+            hits.append({"path": fp, "size": st.st_size, "mtime": st.st_mtime,
+                         "ext": ext, "reason": "大文件" if big else "旧安装包/临时"})
+    hits.sort(key=lambda x: x["size"], reverse=True)
+    return {"dirs": dirs, "rows": hits[:limit], "count": len(hits),
+            "total": sum(h["size"] for h in hits),
+            "min_mb": min_mb, "days": days}
+
+
+def _env_check(cfg: dict) -> list[dict]:
+    """113 环境体检：python / node / ollama / openclaw / git / wps 一键看版本。"""
+    rows = []
+
+    def probe(name, args):
+        t0 = time.time()
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=25,
+                               errors="replace")
+            lines = (r.stdout or r.stderr or "").strip().splitlines()
+            return {"name": name, "ok": bool(lines) and r.returncode == 0,
+                    "detail": (lines[0] if lines else "")[:140],
+                    "ms": int((time.time() - t0) * 1000)}
+        except FileNotFoundError:
+            return {"name": name, "ok": False, "detail": "没找到可执行文件", "ms": 0}
+        except Exception as e:  # noqa: BLE001
+            return {"name": name, "ok": False, "detail": str(e)[:140], "ms": 0}
+
+    rows.append(probe("Python", [sys.executable, "-V"]))
+    for name, exe, args in (("Node.js", shutil.which("node"), ["-v"]),
+                            ("Ollama", shutil.which("ollama"), ["--version"]),
+                            ("Git", shutil.which("git"), ["--version"])):
+        rows.append(probe(name, [exe] + args) if exe else
+                    {"name": name, "ok": False, "detail": "不在 PATH 里", "ms": 0})
+    claw = integrations.resolve_openclaw_cmd()
+    rows.append(probe("OpenClaw", list(claw) + ["--version"]) if claw else
+                {"name": "OpenClaw", "ok": False, "detail": "没找到 openclaw 命令（npm i -g）", "ms": 0})
+    for name, app, hint in (("WPS 文字", "wps", "没装 WPS 文字"), ("WPS 表格", "et", "没装 WPS 表格")):
+        p = integrations.find_wps(app)
+        rows.append({"name": name, "ok": bool(p), "detail": p or hint, "ms": 0})
+    ai = ((cfg.get("ai") or {}).get("base_url") or "")
+    rows.append({"name": "AI 后端", "ok": bool(ai), "detail": ai or "设置里没填 base_url", "ms": 0})
+    rows.append({"name": "ConPTY 终端", "ok": conpty.AVAILABLE, "ms": 0,
+                 "detail": "可用（Windows 10 1809+）" if conpty.AVAILABLE else "本机不支持 ConPTY"})
+    rows.append({"name": "配置文件", "ok": os.path.isfile(CONFIG_PATH), "ms": 0,
+                 "detail": CONFIG_PATH})
+    return rows
+
+
+def _cron_exec(c) -> dict:
+    """108 跑一条定时任务：kind=cmd 走 shell，kind=claw 交给 OpenClaw。"""
+    payload = (c.get("payload") or "").strip()
+    if not payload:
+        return {"ok": False, "error": "任务是空的"}
+    kind = (c.get("kind") or "cmd").lower()
+    t0 = time.time()
+    if kind == "claw":
+        ctx = ""
+        try:
+            ctx = _openclaw_ctx_parts()
+        except Exception:  # noqa: BLE001
+            ctx = ""
+        r = _claw_run_with_retry(payload, ctx, 180)
+        out = r.get("reply") or r.get("error") or ""
+        return {"ok": bool(r.get("ok")), "out": out[:4000], "error": r.get("error", ""),
+                "dur": round(time.time() - t0, 1)}
+    try:
+        rr = subprocess.run(payload, shell=True, cwd=BASE, capture_output=True,
+                            text=True, timeout=120, errors="replace")
+        return {"ok": rr.returncode == 0, "out": (rr.stdout or "")[-4000:],
+                "error": (rr.stderr or "")[-2000:], "code": rr.returncode,
+                "dur": round(time.time() - t0, 1)}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "超时（120 秒）", "dur": round(time.time() - t0, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e), "dur": round(time.time() - t0, 1)}
+
+
+def _openclaw_ctx_parts() -> str:
+    """给 cron 用的轻上下文（不依赖 Handler 实例）。"""
+    try:
+        d = today_str()
+    except Exception:  # noqa: BLE001
+        d = ""
+    return f"今天是 {d}。" if d else ""
+
+
+def today_str() -> str:
+    return time.strftime("%Y-%m-%d")
 
 
 # 视觉/OCR 模型的名字特征。Ollama 里能读图的都带这类关键词，
@@ -1185,8 +1368,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
 
-    def _term_out(self):
+    def _term_out(self, sid: str = ""):
         """SSE 流：持续把 PTY 累积输出推给前端（base64）。会话关闭时发 closed 事件。"""
+        sid = sid or conpty.DEFAULT_SID
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -1194,7 +1378,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             while True:
-                if not conpty.is_active():
+                if not conpty.is_active(sid):
                     # 首帧就发现没活着的会话，或中途退出
                     try:
                         self.wfile.write(b"event: closed\ndata: 1\n\n")
@@ -1202,7 +1386,7 @@ class Handler(BaseHTTPRequestHandler):
                     except (BrokenPipeError, OSError):
                         pass
                     break
-                chunk = conpty.read_available()
+                chunk = conpty.read_available(sid)
                 if chunk:
                     b64 = base64.b64encode(chunk).decode("ascii")
                     try:
@@ -1628,8 +1812,10 @@ class Handler(BaseHTTPRequestHandler):
                         "stats": STORE.weight_stats()})
             return
 
-        if p == "/api/clip":
-            self._json({"rows": STORE.clip_list()})
+        if p == "/api/clip":                           # 106 剪贴板历史（?q= 搜索）
+            _q = parse_qs(u.query)
+            self._json({"rows": STORE.clip_list_q(
+                _q.get("q", [""])[0], int(_q.get("limit", ["200"])[0] or 200))})
             return
 
         if p == "/api/reminders":
@@ -1911,9 +2097,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"rows": STORE.bridge_pending_list()})
             return
 
-        # 交互终端输出流（SSE）：把 PTY 累积的输出以 base64 推给前端
+        # 交互终端输出流（SSE）：把 PTY 累积的输出以 base64 推给前端（105 多标签：?sid=）
         if p == "/api/term/out":
-            self._term_out()
+            self._term_out(parse_qs(u.query).get("sid", [""])[0])
             return
 
         if p == "/api/chats":
@@ -1952,6 +2138,53 @@ class Handler(BaseHTTPRequestHandler):
                 "procs": sysinfo.procs(40),
                 "cores": os.cpu_count(),
             })
+            return
+
+        if p == "/api/term/sessions":                  # 105 现存的终端标签会话
+            self._json({"rows": conpty.sessions(), "conpty": conpty.AVAILABLE})
+            return
+
+        if p == "/api/cron":                           # 108 定时任务列表
+            self._json({"ok": True, "rows": STORE.cron_list(),
+                        "due": STORE.cron_due(),
+                        "openclaw": integrations.resolve_openclaw_cmd() is not None})
+            return
+
+        if p == "/api/cron/due":                       # 108 到点该跑的（前端轮询）
+            self._json({"ok": True, "rows": STORE.cron_due()})
+            return
+
+        if p == "/api/logs":                           # 114 工作台自身运行日志
+            q = parse_qs(u.query)
+            rows = STORE.log_list(int(q.get("limit", ["300"])[0] or 300),
+                                  q.get("level", [""])[0])
+            self._json({"ok": True, "rows": rows, "stats": STORE.log_stats()})
+            return
+
+        if p == "/api/ports":                          # 111 端口占用
+            self._json({"ok": True, "rows": _ports_used()})
+            return
+
+        if p == "/api/cleanup":                        # 112 清理建议（只报不删）
+            q = parse_qs(u.query)
+            self._json({"ok": True, **_cleanup_scan(
+                int(q.get("min_mb", ["100"])[0] or 100),
+                int(q.get("days", ["30"])[0] or 30),
+                int(q.get("limit", ["80"])[0] or 80))})
+            return
+
+        if p == "/api/envcheck":                       # 113 环境体检
+            self._json({"ok": True, "rows": _env_check(CFG)})
+            return
+
+        if p == "/api/speedtest":                      # 110 网速测试：下发测试数据，前端计时算 Mbps
+            mb = parse_qs(u.query).get("mb", ["4"])[0]
+            try:
+                mb = max(1, min(32, int(mb or 4)))
+            except (TypeError, ValueError):
+                mb = 4
+            self._bytes(os.urandom(mb * 1024 * 1024), "application/octet-stream",
+                        f"speedtest_{mb}mb.bin")
             return
 
         if p == "/api/files/preview":
@@ -2149,6 +2382,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p = u.path
+
+        # 110 上传测速：只量客户端送上来多少字节，不落盘
+        if p == "/api/speedtest/upload":
+            n = int(self.headers.get("Content-Length") or 0)
+            got = 0
+            try:
+                while got < n:
+                    chunk = self.rfile.read(min(65536, n - got))
+                    if not chunk:
+                        break
+                    got += len(chunk)
+            except Exception:  # noqa: BLE001
+                pass
+            self._json({"ok": True, "bytes": got})
+            return
+
         body = self._body()
 
         if p == "/api/scan":
@@ -2408,6 +2657,48 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/clip/clear":
             self._json(STORE.clip_clear())
             return
+        if p == "/api/clip/pin":                       # 106 置顶
+            self._json(STORE.clip_pin(int(body.get("id", 0)), body.get("on", 1)))
+            return
+
+        # ---- 108 定时任务（cron 简版）----
+        if p == "/api/cron/save":
+            self._json(STORE.cron_save(
+                body.get("id") or None, body.get("name", ""), body.get("kind", "cmd"),
+                body.get("payload", ""), body.get("sched", ""),
+                body.get("enabled", 1), int(body.get("notify", 0) or 0)))
+            return
+        if p == "/api/cron/toggle":
+            self._json(STORE.cron_toggle(int(body.get("id", 0)), body.get("on", 1)))
+            return
+        if p == "/api/cron/del":
+            self._json(STORE.cron_del(int(body.get("id", 0))))
+            return
+        if p == "/api/cron/run":                       # 立即跑一次（也用于到点后前端触发）
+            cid = int(body.get("id", 0))
+            c = STORE.cron_get(cid)
+            if not c:
+                self._json({"ok": False, "error": "没这条任务"})
+                return
+            r = _cron_exec(c)
+            STORE.cron_mark(cid, bool(r.get("ok")), (r.get("out") or r.get("error") or "")[:800])
+            STORE.log_add("ok" if r.get("ok") else "err",
+                          f"定时任务「{c.get('name') or cid}」执行{'成功' if r.get('ok') else '失败'}",
+                          "cron")
+            if c.get("notify") and (r.get("out") or r.get("error")):
+                try:
+                    _push_all(f"⏰ {c.get('name') or '定时任务'}",
+                              (r.get("out") or r.get("error") or "")[:1500])
+                except Exception:  # noqa: BLE001
+                    pass
+            r["row"] = STORE.cron_get(cid)
+            self._json(r)
+            return
+
+        # ---- 114 日志 ----
+        if p == "/api/logs/clear":
+            self._json(STORE.log_clear())
+            return
 
         # ---- 定时提醒 ----
         if p == "/api/reminders/add":
@@ -2430,21 +2721,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json(self._term_run(body.get("cmd", "")))
             return
 
-        # ---- 交互终端（ConPTY 真终端，仅 Windows 10 1809+ 可用）----
+        # ---- 交互终端（ConPTY 真终端，仅 Windows 10 1809+ 可用）105 多标签：按 sid 分会话 ----
         if p == "/api/term/start":
             ok, msg = conpty.start_session(
-                cols=int(body.get("cols") or 120), rows=int(body.get("rows") or 30))
-            self._json({"ok": ok, "error": msg})
+                cols=int(body.get("cols") or 120), rows=int(body.get("rows") or 30),
+                sid=str(body.get("sid") or conpty.DEFAULT_SID))
+            self._json({"ok": ok, "error": msg, "sid": str(body.get("sid") or conpty.DEFAULT_SID)})
             return
 
         if p == "/api/term/in":
-            ok, msg = conpty.write_input(body.get("data", ""))
+            ok, msg = conpty.write_input(body.get("data", ""), str(body.get("sid") or conpty.DEFAULT_SID))
             self._json({"ok": ok, "error": msg})
             return
 
         if p == "/api/term/resize":
-            conpty.resize(int(body.get("cols") or 0), int(body.get("rows") or 0))
+            conpty.resize(int(body.get("cols") or 0), int(body.get("rows") or 0),
+                          str(body.get("sid") or conpty.DEFAULT_SID))
             self._json({"ok": True})
+            return
+
+        if p == "/api/term/close":                     # 105 关掉某个标签的会话
+            conpty.close_session(str(body.get("sid") or conpty.DEFAULT_SID))
+            self._json({"ok": True, "sessions": conpty.sessions()})
             return
 
         # ---- 文件标签 / 批量 ----
@@ -3964,6 +4262,11 @@ def main():
     srv = ThreadingHTTPServer((host, port), Handler)
     # 69 定时发送的看门人在后台，到点就把排队的邮件发出去
     threading.Thread(target=_mail_loop, daemon=True).start()
+    # 114 启动留痕，日志页一眼能看到这次是几点起的
+    try:
+        STORE.log_add("info", f"工作台已启动：http://{host}:{port}", "server")
+    except Exception:  # noqa: BLE001
+        pass
     print(f"工作台已启动： http://{host}:{port}")
     try:
         srv.serve_forever()

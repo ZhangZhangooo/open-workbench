@@ -359,6 +359,31 @@ CREATE TABLE IF NOT EXISTS weights (
     created REAL
 );
 CREATE INDEX IF NOT EXISTS weights_day ON weights(day);
+
+-- L 域：系统工具（105-114）
+CREATE TABLE IF NOT EXISTS crons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    kind TEXT DEFAULT 'cmd',      -- cmd / claw
+    payload TEXT,                 -- 命令或给 OpenClaw 的任务
+    sched TEXT,                   -- HH:MM / every:N / every:Nh / 5 段 cron
+    enabled INTEGER DEFAULT 1,
+    notify INTEGER DEFAULT 0,     -- 跑完把结果推到连接器
+    last_run REAL,
+    last_ok INTEGER,
+    last_out TEXT,
+    runs INTEGER DEFAULT 0,
+    oks INTEGER DEFAULT 0,
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS wlog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT,                   -- info / ok / warn / err
+    src TEXT,                     -- 来源（cron / server / kb …）
+    msg TEXT,
+    created REAL
+);
+CREATE INDEX IF NOT EXISTS wlog_created ON wlog(created);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -403,6 +428,8 @@ ALTERS = [
     "ALTER TABLE kb ADD COLUMN fav INTEGER DEFAULT 0",
     "ALTER TABLE kb ADD COLUMN summary TEXT DEFAULT ''",
     "ALTER TABLE kb ADD COLUMN read_at REAL",
+    # L 域：系统工具（105-114）
+    "ALTER TABLE clip ADD COLUMN pinned INTEGER DEFAULT 0",
 ]
 
 PROMPT_SCHEMA = """
@@ -438,6 +465,95 @@ def _today() -> str:
 def _tomorrow() -> str:
     import datetime as _dt
     return (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+
+
+# ---- 108 定时任务：cron 简版 ----------
+# 支持四种写法：HH:MM（每天） / every:N（每 N 分钟） / every:Nh（每 N 小时）
+# / 标准 5 段（分 时 日 月 周，字段支持 * , a-b  a */n）。周里 0=周日。
+
+def _cron_field_ok(expr: str) -> bool:
+    expr = (expr or "").strip()
+    if not expr:
+        return False
+    for part in expr.split(","):
+        part = part.strip()
+        if part == "*":
+            continue
+        m = re.match(r"^\*/(\d+)$", part)
+        if m:
+            if int(m.group(1)) <= 0:
+                return False
+            continue
+        m = re.match(r"^(\d+)-(\d+)$", part)
+        if m:
+            if int(m.group(1)) > int(m.group(2)):
+                return False
+            continue
+        if part.isdigit():
+            continue
+        return False
+    return True
+
+
+def _cron_valid(spec: str) -> bool:
+    spec = (spec or "").strip()
+    if not spec:
+        return False
+    if re.match(r"^every:\d+[mh]?$", spec, re.I):
+        return True
+    m = re.match(r"^(\d{1,2}):(\d{1,2})$", spec)     # HH:MM（每天这个点）
+    if m:
+        return 0 <= int(m.group(1)) <= 23 and 0 <= int(m.group(2)) <= 59
+    parts = spec.split()
+    if len(parts) == 5:
+        return all(_cron_field_ok(x) for x in parts)
+    return False
+
+
+def _cron_field_hit(expr: str, val: int) -> bool:
+    expr = (expr or "").strip()
+    if expr == "*":
+        return True
+    for part in expr.split(","):
+        part = part.strip()
+        m = re.match(r"^\*/(\d+)$", part)
+        if m:
+            n = int(m.group(1))
+            if n > 0 and val % n == 0:
+                return True
+            continue
+        m = re.match(r"^(\d+)-(\d+)$", part)
+        if m:
+            if int(m.group(1)) <= val <= int(m.group(2)):
+                return True
+            continue
+        if part.isdigit() and int(part) == val:
+            return True
+    return False
+
+
+def _cron_match(spec: str, dt, last: float, now: float) -> bool:
+    spec = (spec or "").strip()
+    m = re.match(r"^every:(\d+)([mh]?)$", spec, re.I)
+    if m:
+        n = int(m.group(1))
+        step = n * (3600 if (m.group(2) or "m").lower() == "h" else 60)
+        return step > 0 and now - (last or 0) >= step
+    parts = spec.split()
+    m = re.match(r"^(\d{1,2}):(\d{1,2})$", spec)       # HH:MM
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if dt.hour != h or dt.minute != mi:
+            return False
+        return now - (last or 0) >= 60                 # 同一分钟内只跑一次
+    if len(parts) == 5:
+        mi, hh, dom, mon, dow = parts
+        if not (_cron_field_hit(mi, dt.minute) and _cron_field_hit(hh, dt.hour)
+                and _cron_field_hit(dom, dt.day) and _cron_field_hit(mon, dt.month)
+                and _cron_field_hit(dow, (dt.weekday() + 1) % 7)):
+            return False
+        return now - (last or 0) >= 60
+    return False
 
 
 # ---- 73 重复日程：规则展开 ----
@@ -2939,3 +3055,115 @@ class Store:
             n += 1
         self.kv_set("lifeMigrated", "1")
         return {"ok": True, "skipped": False, "n": n}
+
+    # ---------------- L 域：系统工具（105-114）----------------
+
+    # 106 剪贴板：置顶 + 搜索
+
+    def clip_pin(self, cid: int, on=1) -> dict:
+        self._run("UPDATE clip SET pinned=? WHERE id=?", (1 if on else 0, cid), False)
+        return {"ok": True}
+
+    def clip_list_q(self, q: str = "", limit: int = 200) -> list[dict]:
+        """置顶优先，再按时间倒序；q 非空时按内容模糊筛。"""
+        q = (q or "").strip()
+        if q:
+            like = f"%{q}%"
+            return self._run(
+                "SELECT id, text, created, pinned FROM clip WHERE text LIKE ? "
+                "ORDER BY pinned DESC, id DESC LIMIT ?", (like, limit))
+        return self._run(
+            "SELECT id, text, created, pinned FROM clip ORDER BY pinned DESC, id DESC LIMIT ?",
+            (limit,))
+
+    # 108 定时任务（cron 简版）
+
+    def cron_list(self) -> list[dict]:
+        return self._run("SELECT * FROM crons ORDER BY enabled DESC, id DESC")
+
+    def cron_get(self, cid: int) -> dict | None:
+        rows = self._run("SELECT * FROM crons WHERE id=?", (cid,))
+        return rows[0] if rows else None
+
+    def cron_save(self, cid, name: str, kind: str, payload: str, sched: str,
+                  enabled=1, notify=0) -> dict:
+        name = (name or "").strip() or "未命名任务"
+        payload = (payload or "").strip()
+        sched = (sched or "").strip() or "every:60"
+        if not payload:
+            return {"ok": False, "error": "任务内容不能为空"}
+        if not _cron_valid(sched):
+            return {"ok": False, "error": "时间写法看不懂：用 HH:MM / every:30 / every:2h / 5 段 cron"}
+        kind = "claw" if (kind or "").lower() == "claw" else "cmd"
+        if cid:
+            self._run("UPDATE crons SET name=?, kind=?, payload=?, sched=?, enabled=?, notify=? WHERE id=?",
+                      (name, kind, payload, sched, 1 if enabled else 0,
+                       1 if notify else 0, int(cid)), False)
+            return {"ok": True, "id": int(cid)}
+        cur = self.conn.execute(
+            "INSERT INTO crons (name, kind, payload, sched, enabled, notify, created) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (name, kind, payload, sched, 1 if enabled else 0, 1 if notify else 0, time.time()))
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid}
+
+    def cron_toggle(self, cid: int, on=1) -> dict:
+        self._run("UPDATE crons SET enabled=? WHERE id=?", (1 if on else 0, cid), False)
+        return {"ok": True}
+
+    def cron_del(self, cid: int) -> dict:
+        self._run("DELETE FROM crons WHERE id=?", (cid,), False)
+        return {"ok": True}
+
+    def cron_mark(self, cid: int, ok: bool, out: str = "") -> dict:
+        self._run(
+            "UPDATE crons SET last_run=?, last_ok=?, last_out=?, "
+            "runs=COALESCE(runs,0)+1, oks=COALESCE(oks,0)+? WHERE id=?",
+            (time.time(), 1 if ok else 0, (out or "")[:2000], 1 if ok else 0, cid), False)
+        return {"ok": True}
+
+    def cron_due(self, now: float | None = None) -> list[dict]:
+        """到点该跑的（前端轮询这个再逐条触发执行）。"""
+        now = now or time.time()
+        dt = datetime.datetime.fromtimestamp(now)
+        out = []
+        for c in self.cron_list():
+            if not c.get("enabled"):
+                continue
+            last = c.get("last_run") or c.get("created") or 0
+            if _cron_match(c.get("sched") or "", dt, last, now):
+                out.append(c)
+        return out
+
+    # 114 日志查看器
+
+    def log_add(self, level: str, msg: str, src: str = "") -> dict:
+        msg = (msg or "").strip()
+        if not msg:
+            return {"ok": False}
+        self._run("INSERT INTO wlog (level, src, msg, created) VALUES (?,?,?,?)",
+                  ((level or "info")[:8], (src or "")[:24], msg[:4000], time.time()), False)
+        # 只留最近 3000 条，别把库撑爆
+        self._run("DELETE FROM wlog WHERE id NOT IN "
+                  "(SELECT id FROM wlog ORDER BY id DESC LIMIT 3000)", (), False)
+        return {"ok": True}
+
+    def log_list(self, limit: int = 300, level: str = "") -> list[dict]:
+        level = (level or "").strip()
+        if level:
+            return self._run("SELECT * FROM wlog WHERE level=? ORDER BY id DESC LIMIT ?",
+                             (level, limit))
+        return self._run("SELECT * FROM wlog ORDER BY id DESC LIMIT ?", (limit,))
+
+    def log_stats(self) -> dict:
+        rows = self._run("SELECT level, COUNT(*) AS n FROM wlog GROUP BY level")
+        d = {r["level"]: r["n"] for r in rows}
+        tot = self._run("SELECT COUNT(*) AS n FROM wlog")
+        return {"total": (tot[0]["n"] if tot else 0),
+                "err": d.get("err", 0), "warn": d.get("warn", 0),
+                "ok": d.get("ok", 0), "info": d.get("info", 0)}
+
+    def log_clear(self) -> dict:
+        self._run("DELETE FROM wlog", (), False)
+        return {"ok": True}
+

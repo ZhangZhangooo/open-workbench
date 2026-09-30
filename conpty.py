@@ -4,6 +4,9 @@
 start_session() 起一个 powershell，write_input() 喂按键，read_available() 取输出，
 resize() 改窗口大小。读线程把 PTY 管道的输出字节攒进缓冲区，UTF-8 解码后给前端。
 
+105 终端多标签：会话按 sid（字符串 id）分开存，互不干扰。不传 sid 时默认 "1"，
+老调用点行为不变。
+
 如果不支持（老 Windows / 非 Windows），start_session 返回 (False, 原因)，
 is_active() 恒为 False，前端据此回退到原来的非交互「运行一条命令」模式。
 """
@@ -108,21 +111,38 @@ else:
     _REASON = "非 Windows 平台，没有 ConPTY"
 
 
-# ---------------- 单例会话 ----------------
+# ---------------- 会话表（多标签） ----------------
 
-_state = {
-    "hpc": None,          # HPCON
-    "proc": None,         # PROCESS_INFORMATION
-    "in_fd": None,        # 写端 fd（喂按键）
-    "out_fd": None,       # 读端 fd（取输出）
-    "buf": bytearray(),   # 输出缓冲
-    "lock": threading.Lock(),
-    "alive": False,
-    "thread": None,
-}
+DEFAULT_SID = "1"
+_sessions: dict[str, dict] = {}
+_sessions_lock = threading.Lock()
 
 
-def _reader_loop(out_fd: int):
+def _new_state() -> dict:
+    return {
+        "hpc": None,          # HPCON
+        "proc": None,         # PROCESS_INFORMATION
+        "in_fd": None,        # 写端 fd（喂按键）
+        "out_fd": None,       # 读端 fd（取输出）
+        "buf": bytearray(),   # 输出缓冲
+        "lock": threading.Lock(),
+        "alive": False,
+        "thread": None,
+        "created": time.time(),
+    }
+
+
+def _state(sid: str | None, create: bool = False) -> dict | None:
+    sid = str(sid or DEFAULT_SID)
+    with _sessions_lock:
+        st = _sessions.get(sid)
+        if st is None and create:
+            st = _new_state()
+            _sessions[sid] = st
+        return st
+
+
+def _reader_loop(st: dict, out_fd: int):
     """读 PTY 输出管道，攒进缓冲。管道关闭/进程退出即结束。"""
     while True:
         try:
@@ -131,16 +151,22 @@ def _reader_loop(out_fd: int):
             chunk = b""
         if not chunk:
             break
-        with _state["lock"]:
-            _state["buf"].extend(chunk)
-    _state["alive"] = False
+        with st["lock"]:
+            st["buf"].extend(chunk)
+    st["alive"] = False
 
 
-def start_session(cols: int = 120, rows: int = 30, shell: str = "powershell.exe") -> tuple[bool, str]:
+def start_session(cols: int = 120, rows: int = 30, shell: str = "powershell.exe",
+                  sid: str | None = None) -> tuple[bool, str]:
     if not AVAILABLE:
         return False, _REASON or "本机不支持 ConPTY（需 Windows 10 1809+）"
-    if _state["alive"]:
+    st = _state(sid, create=True)
+    if st["alive"]:
         return True, ""
+    if len(_sessions) > 12:  # 兜底，别开出几十个 powershell
+        dead = [k for k, v in _sessions.items() if not v["alive"]]
+        for k in dead[:8]:
+            _sessions.pop(k, None)
 
     hInR = HANDLE(); hInW = HANDLE()
     hOutR = HANDLE(); hOutW = HANDLE()
@@ -190,59 +216,84 @@ def start_session(cols: int = 120, rows: int = 30, shell: str = "powershell.exe"
     k32.CloseHandle(hInR)
     k32.CloseHandle(hOutW)
 
-    _state["hpc"] = hpc
-    _state["proc"] = pi
-    _state["in_fd"] = msvcrt.open_osfhandle(int(hInW.value), os.O_WRONLY | os.O_BINARY)
-    _state["out_fd"] = msvcrt.open_osfhandle(int(hOutR.value), os.O_RDONLY | os.O_BINARY)
-    _state["alive"] = True
-    with _state["lock"]:
-        _state["buf"] = bytearray()
-    _state["thread"] = threading.Thread(target=_reader_loop, args=(_state["out_fd"],), daemon=True)
-    _state["thread"].start()
+    st["hpc"] = hpc
+    st["proc"] = pi
+    st["in_fd"] = msvcrt.open_osfhandle(int(hInW.value), os.O_WRONLY | os.O_BINARY)
+    st["out_fd"] = msvcrt.open_osfhandle(int(hOutR.value), os.O_RDONLY | os.O_BINARY)
+    st["alive"] = True
+    st["created"] = time.time()
+    with st["lock"]:
+        st["buf"] = bytearray()
+    st["thread"] = threading.Thread(target=_reader_loop, args=(st, st["out_fd"]), daemon=True)
+    st["thread"].start()
     return True, ""
 
 
-def write_input(data: str) -> tuple[bool, str]:
-    if not _state["alive"] or _state["in_fd"] is None:
+def write_input(data: str, sid: str | None = None) -> tuple[bool, str]:
+    st = _state(sid)
+    if not st or not st["alive"] or st["in_fd"] is None:
         return False, "终端没在运行"
     try:
-        os.write(_state["in_fd"], data.encode("utf-8", "replace"))
+        os.write(st["in_fd"], data.encode("utf-8", "replace"))
         return True, ""
     except OSError as e:
         return False, str(e)
 
 
-def read_available() -> bytes:
+def read_available(sid: str | None = None) -> bytes:
     """取走并清空自上次调用以来累积的输出字节。"""
-    with _state["lock"]:
-        b = bytes(_state["buf"])
-        _state["buf"] = bytearray()
+    st = _state(sid)
+    if not st:
+        return b""
+    with st["lock"]:
+        b = bytes(st["buf"])
+        st["buf"] = bytearray()
     return b
 
 
-def resize(cols: int, rows: int) -> bool:
-    if not _state["alive"] or not _state["hpc"]:
+def resize(cols: int, rows: int, sid: str | None = None) -> bool:
+    st = _state(sid)
+    if not st or not st["alive"] or not st["hpc"]:
         return False
     try:
-        k32.ResizePseudoConsole(_state["hpc"], COORD(cols, rows))
+        k32.ResizePseudoConsole(st["hpc"], COORD(cols, rows))
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
-def is_active() -> bool:
-    return bool(_state["alive"])
+def is_active(sid: str | None = None) -> bool:
+    st = _state(sid)
+    return bool(st and st["alive"])
 
 
-def close_session() -> None:
-    if _state["proc"]:
+def close_session(sid: str | None = None) -> None:
+    st = _state(sid)
+    if not st:
+        return
+    if st["proc"]:
         try:
-            k32.TerminateProcess(_state["proc"].hProcess, 0)
+            k32.TerminateProcess(st["proc"].hProcess, 0)
         except Exception:  # noqa: BLE001
             pass
-    if _state["hpc"]:
+    if st["hpc"]:
         try:
-            k32.ClosePseudoConsole(_state["hpc"])
+            k32.ClosePseudoConsole(st["hpc"])
         except Exception:  # noqa: BLE001
             pass
-    _state["alive"] = False
+    st["alive"] = False
+
+
+def sessions() -> list[dict]:
+    """当前所有会话（含已死的，前端可据此收尾）。"""
+    with _sessions_lock:
+        out = []
+        for k, v in _sessions.items():
+            out.append({"sid": k, "alive": bool(v["alive"]),
+                        "created": v.get("created") or 0})
+        return out
+
+
+def close_all() -> None:
+    for k in list(_sessions.keys()):
+        close_session(k)
