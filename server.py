@@ -1458,6 +1458,38 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # ---------- F 域：文档工作台（列表 / 搜索 / 版本历史）----------
+        if p == "/api/docs/list":
+            q = parse_qs(u.query)
+            self._json({"rows": STORE.docs_list(
+                q.get("q", [""])[0], int(q.get("limit", ["200"])[0] or 200))})
+            return
+
+        if p == "/api/docs/get":
+            row = STORE.docs_get(int(parse_qs(u.query).get("id", ["0"])[0] or 0))
+            self._json({"ok": bool(row), "row": row})
+            return
+
+        if p == "/api/docs/snaps":
+            q = parse_qs(u.query)
+            self._json({"rows": STORE.docs_snaps(
+                int(q.get("id", ["0"])[0] or 0), int(q.get("limit", ["50"])[0] or 50))})
+            return
+
+        if p == "/api/docs/snap":
+            row = STORE.docs_snap_get(int(parse_qs(u.query).get("sid", ["0"])[0] or 0))
+            self._json({"ok": bool(row), "row": row})
+            return
+
+        if p == "/api/docs/raw":
+            row = STORE.docs_get(int(parse_qs(u.query).get("id", ["0"])[0] or 0))
+            if not row:
+                self._json({"ok": False, "error": "没这篇文档"})
+                return
+            self._json({"ok": True, "title": row.get("title") or "文档",
+                        "md": row.get("md") or ""})
+            return
+
         if p == "/api/mail/list":
             q = parse_qs(u.query)
             self._json(
@@ -1802,6 +1834,30 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/docs/make":
             self._doc_make(body)
+            return
+
+        # ---------- F 域：文档工作台写操作 ----------
+        if p == "/api/docs/save":
+            self._json(STORE.docs_save(
+                int(body.get("id", 0) or 0), body.get("title", ""), body.get("md", ""),
+                body.get("note", ""), bool(body.get("snap", True))))
+            return
+
+        if p == "/api/docs/del":
+            self._json(STORE.docs_del(int(body.get("id", 0) or 0)))
+            return
+
+        if p == "/api/docs/fav":
+            self._json(STORE.docs_fav(int(body.get("id", 0) or 0), body.get("on")))
+            return
+
+        if p == "/api/docs/restore":
+            self._json(STORE.docs_restore(int(body.get("id", 0) or 0),
+                                          int(body.get("sid", 0) or 0)))
+            return
+
+        if p == "/api/docs/batch":
+            self._json(self._docs_batch(body))
             return
 
         if p == "/api/docs/ai-doc":
@@ -2701,6 +2757,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"ok": True, "file": name, "url": f"/api/download/{name}",
                     "title": title, "note": r.get("note", ""), "kind": r.get("kind")})
+
+    def _docs_batch(self, body: dict) -> dict:
+        """多选文档批量转 docx/pptx（61）。一份一份写，最后把成败清单带回去。"""
+        ids = body.get("ids") or []
+        kind = (body.get("kind") or "word").strip() or "word"
+        if not isinstance(ids, list) or not ids:
+            return {"ok": False, "error": "没选文档"}
+        made, failed = [], []
+        for i in ids[:80]:
+            row = STORE.docs_get(int(i or 0))
+            if not row:
+                failed.append({"id": int(i or 0), "title": "", "error": "找不到这篇"})
+                continue
+            title = row.get("title") or "文档"
+            md = row.get("md") or ""
+            if not md.strip():
+                failed.append({"id": row["id"], "title": title, "error": "正文是空的"})
+                continue
+            try:
+                name = docswrite.safe_name(title, kind)
+                r = docswrite.write_any(os.path.join(EXPORTS, name), kind, md, title)
+            except Exception as e:  # noqa: BLE001
+                failed.append({"id": row["id"], "title": title,
+                               "error": f"{type(e).__name__}: {e}"})
+                continue
+            if r.get("ok"):
+                made.append({"id": row["id"], "title": title,
+                             "file": os.path.basename(r.get("path") or name),
+                             "url": f"/api/download/{os.path.basename(r.get('path') or name)}",
+                             "note": r.get("note", "")})
+            else:
+                failed.append({"id": row["id"], "title": title,
+                               "error": r.get("error") or "转换失败"})
+        return {"ok": True, "made": made, "failed": failed,
+                "n": len(made), "nfail": len(failed)}
 
     def _ai_doc(self, body: dict):
         """用模型写出 Markdown，再落成 docx / pptx / xlsx。"""

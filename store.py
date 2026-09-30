@@ -205,6 +205,24 @@ CREATE TABLE IF NOT EXISTS file_open (
     opened REAL,
     count INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS docs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    md TEXT,
+    tags TEXT DEFAULT '',
+    fav INTEGER DEFAULT 0,
+    created REAL,
+    updated REAL
+);
+CREATE TABLE IF NOT EXISTS doc_snaps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id INTEGER,
+    ts REAL,
+    md TEXT,
+    chars INTEGER DEFAULT 0,
+    note TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_doc_snaps ON doc_snaps(doc_id, ts);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -1026,6 +1044,106 @@ class Store:
                 "SELECT * FROM bridge_audit WHERE action=? ORDER BY id DESC LIMIT ?",
                 (action, int(limit)))
         return self._run("SELECT * FROM bridge_audit ORDER BY id DESC LIMIT ?", (int(limit),))
+
+    # ---- 文档工作台：Markdown 正文 + 版本快照 + 全文搜 ----
+
+    @staticmethod
+    def _doc_snippet(md: str, n: int = 90) -> str:
+        t = " ".join((md or "").split())
+        return t[:n]
+
+    def docs_list(self, q: str = "", limit: int = 200) -> list[dict]:
+        """标题 + 正文一起搜；空 q 就是全部（最近的在前）。"""
+        q = (q or "").strip()
+        if q:
+            like = "%" + q + "%"
+            rows = self._run(
+                "SELECT id, title, tags, fav, created, updated, md FROM docs "
+                "WHERE title LIKE ? OR md LIKE ? OR tags LIKE ? ORDER BY updated DESC LIMIT ?",
+                (like, like, like, int(limit)))
+        else:
+            rows = self._run(
+                "SELECT id, title, tags, fav, created, updated, md FROM docs "
+                "ORDER BY updated DESC LIMIT ?", (int(limit),))
+        for r in rows:
+            r["chars"] = len(r.get("md") or "")
+            r["snippet"] = self._doc_snippet(r.get("md"))
+            r.pop("md", None)
+        return rows
+
+    def docs_get(self, id_: int) -> dict:
+        rows = self._run("SELECT * FROM docs WHERE id=?", (int(id_),))
+        if not rows:
+            return {}
+        r = rows[0]
+        r["chars"] = len(r.get("md") or "")
+        return r
+
+    def docs_save(self, id_: int, title: str, md: str, note: str = "",
+                  snap: bool = True) -> dict:
+        """存正文；每次保存都落一个快照，于是「保存即版本」（可回滚）。"""
+        now = time.time()
+        title = (title or "").strip() or "未命名文档"
+        md = md if isinstance(md, str) else ""
+        cur = self._run("SELECT id FROM docs WHERE id=?", (int(id_ or 0),)) if id_ else []
+        if cur:
+            did = int(cur[0]["id"])
+            self._run("UPDATE docs SET title=?, md=?, updated=? WHERE id=?",
+                      (title, md, now, did), False)
+            created = False
+        else:
+            self._run("INSERT INTO docs (title, md, tags, fav, created, updated) "
+                      "VALUES (?,?,?,?,?,?)", (title, md, "", 0, now, now), False)
+            did = int(self._run("SELECT last_insert_rowid() AS i")[0]["i"])
+            created = True
+        sid = 0
+        if snap:
+            sid = self._snap_add(did, md, note)
+        return {"ok": True, "id": did, "created": created, "snap": sid,
+                "chars": len(md), "updated": now}
+
+    def _snap_add(self, doc_id: int, md: str, note: str = "") -> int:
+        self._run("INSERT INTO doc_snaps (doc_id, ts, md, chars, note) VALUES (?,?,?,?,?)",
+                  (int(doc_id), time.time(), md or "", len(md or ""),
+                   (note or "")[:120]), False)
+        return int(self._run("SELECT last_insert_rowid() AS i")[0]["i"])
+
+    def docs_del(self, id_: int) -> dict:
+        self._run("DELETE FROM docs WHERE id=?", (int(id_),), False)
+        self._run("DELETE FROM doc_snaps WHERE doc_id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def docs_fav(self, id_: int, on=None) -> dict:
+        if on is None:
+            cur = self._run("SELECT fav FROM docs WHERE id=?", (int(id_),))
+            if not cur:
+                return {"ok": False, "error": "没这篇文档"}
+            on = 0 if cur[0].get("fav") else 1
+        self._run("UPDATE docs SET fav=? WHERE id=?", (int(on), int(id_)), False)
+        return {"ok": True, "id": int(id_), "fav": bool(on)}
+
+    def docs_snaps(self, doc_id: int, limit: int = 50) -> list[dict]:
+        return self._run(
+            "SELECT id, doc_id, ts, chars, note FROM doc_snaps WHERE doc_id=? "
+            "ORDER BY id DESC LIMIT ?", (int(doc_id), int(limit)))
+
+    def docs_snap_get(self, sid: int) -> dict:
+        rows = self._run("SELECT * FROM doc_snaps WHERE id=?", (int(sid),))
+        return rows[0] if rows else {}
+
+    def docs_restore(self, doc_id: int, sid: int) -> dict:
+        """回滚到某个快照：先把当前正文存成新快照（免得回滚本身把现在弄丢），再覆盖。"""
+        snap = self.docs_snap_get(sid)
+        if not snap or int(snap.get("doc_id") or 0) != int(doc_id):
+            return {"ok": False, "error": "没这个快照"}
+        cur = self.docs_get(doc_id)
+        if not cur:
+            return {"ok": False, "error": "没这篇文档"}
+        self._snap_add(doc_id, cur.get("md") or "", "回滚前的自动备份")
+        self._run("UPDATE docs SET md=?, updated=? WHERE id=?",
+                  (snap.get("md") or "", time.time(), int(doc_id)), False)
+        return {"ok": True, "chars": len(snap.get("md") or ""),
+                "restored_from": int(sid)}
 
     # ---- 连接器推送日志：每次推送留痕，成功失败都可查 ----
 

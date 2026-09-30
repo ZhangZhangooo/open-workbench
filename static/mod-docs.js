@@ -54,31 +54,159 @@ const TEMPLATES = [
   },
 ];
 
-/* 极简 Markdown 渲染：够看就行，不引第三方库 */
-function mdHtml(s) {
+/* ---------- 写作台（F 域）用的小工具：纯前端，无依赖 ---------- */
+
+/* 文档模板：周报 / 日记 / 读书笔记，一键开写 */
+const DOC_TPLS = {
+  weekly: {
+    name: '周报',
+    md: `# 本周周报
+
+## 这周做了什么
+-
+
+## 卡住的地方
+-
+
+## 下周计划
+-
+`,
+  },
+  diary: {
+    name: '日记',
+    md: `# 日记
+
+## 今天发生了什么
+-
+
+## 冒出来的想法
+-
+
+## 明天要做的
+- [ ]
+`,
+  },
+  read: {
+    name: '读书笔记',
+    md: `# 《书名》读书笔记
+
+## 一句话概括
+
+
+## 核心观点
+1.
+
+## 摘抄
+>
+
+## 我的思考
+-
+
+## 可行动项
+- [ ]
+`,
+  },
+};
+
+/* 字数统计 + 预计阅读时间（中文按字算，英文按词算） */
+function wsCount(md) {
+  const t = md || '';
+  const cjk = (t.match(/[\u3400-\u9FFF\uF900-\uFAFF]/g) || []).length;
+  const words = (t.match(/[A-Za-z0-9_'\u00C0-\u024F]+/g) || []).length;
+  const chars = t.replace(/\s/g, '').length;
+  const lines = t ? t.split('\n').length : 0;
+  const total = cjk + words;
+  const mins = total ? Math.max(1, Math.round(total / 350)) : 0;
+  return { cjk, words, chars, lines, total, mins };
+}
+
+/* 大纲目录：抽出所有标题（带行号，供跳转） */
+function wsOutline(md) {
+  const out = [];
+  (md || '').split('\n').forEach((ln, i) => {
+    const m = ln.match(/^(#{1,4})\s+(.+)$/);
+    if (m) out.push({ lv: m[1].length, text: m[2].trim(), line: i });
+  });
+  return out;
+}
+
+/* 表格编辑器 → Markdown：把二维数组拼成 Markdown 表格 */
+function gridToMd(rows) {
+  const cells = rows.map((r) => r.map((c) => (c || '').replace(/\|/g, '\\|')));
+  if (!cells.length) return '';
+  const head = cells[0];
+  const body = cells.slice(1);
+  const line = (arr) => '| ' + arr.join(' | ') + ' |';
+  return [line(head), '|' + head.map(() => ' --- ').join('|') + '|']
+    .concat(body.map(line)).join('\n');
+}
+
+/* 极简 Markdown 渲染：够看就行，不引第三方库。
+   withIds=true 时给标题加锚点，供大纲目录点击跳转 */
+function mdHtml(s, withIds) {
   const lines = esc(s || '').split('\n');
   const out = [];
   let inList = false;
-  for (const ln of lines) {
+  let hi = 0;
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+
+  const inline = (t) => t
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code style="background:var(--bg-soft);padding:1px 4px;border-radius:4px">$1</code>')
+    .replace(/\*(?!\s)(.+?)(?<!\s)\*/g, '<i>$1</i>');
+
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
     const t = ln.trim();
-    if (/^([-*+]|\d+[.)])\s+/.test(t)) {
-      if (!inList) { out.push('<ul style="margin:6px 0;padding-left:20px">'); inList = true; }
-      out.push('<li style="margin:3px 0">' + t.replace(/^([-*+]|\d+[.)])\s+/, '') + '</li>');
+
+    // 表格：连续的 | 行合成一个 table
+    if (/^\|.*\|$/.test(t)) {
+      closeList();
+      const block = [t];
+      while (i + 1 < lines.length && /^\|.*\|$/.test(lines[i + 1].trim())) {
+        i++;
+        block.push(lines[i].trim());
+      }
+      const cells = (row) => row.replace(/^\||\|$/g, '').split('|').map((x) => inline(x.trim()));
+      const head = cells(block[0]);
+      const body = block.slice(1).filter((r) => !/^\|[\s:\-|]+\|$/.test(r)).map(cells);
+      out.push('<table class="md-tbl"><thead><tr>'
+        + head.map((c) => `<th>${c}</th>`).join('')
+        + '</tr></thead><tbody>'
+        + body.map((r) => '<tr>' + r.map((c) => `<td>${c}</td>`).join('') + '</tr>').join('')
+        + '</tbody></table>');
       continue;
     }
-    if (inList) { out.push('</ul>'); inList = false; }
-    if (!t) { out.push('<div style="height:8px"></div>'); continue; }
-    let h = t.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-    const m = h.match(/^(#{1,4})\s+(.*)$/);
-    if (m) {
-      const lv = Math.min(m[1].length, 3);
-      h = `<div style="font-weight:600;font-size:${18 - lv * 2}px;margin:12px 0 6px">${m[2]}</div>`;
+
+    if (/^([-*+]|\d+[.)])\s+/.test(t)) {
+      if (!inList) { out.push('<ul style="margin:6px 0;padding-left:20px">'); inList = true; }
+      out.push('<li style="margin:3px 0">' + inline(t.replace(/^([-*+]|\d+[.)])\s+/, '')) + '</li>');
+      continue;
     }
-    out.push('<div style="margin:4px 0;line-height:1.7">' + h + '</div>');
+    closeList();
+
+    if (/^(-{3,}|\*{3,})$/.test(t)) { out.push('<hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0">'); continue; }
+    if (/^(&gt;|>)\s?/.test(t)) {
+      out.push('<blockquote style="margin:8px 0;padding:6px 12px;border-left:3px solid var(--line-soft);color:var(--ink-2)">'
+        + inline(t.replace(/^(&gt;|>)\s?/, '')) + '</blockquote>');
+      continue;
+    }
+    if (!t) { out.push('<div style="height:8px"></div>'); continue; }
+
+    const m = t.match(/^(#{1,4})\s+(.*)$/);
+    if (m) {
+      const lv = Math.min(m[1].length, 4);
+      const id = withIds ? ` id="hh${hi}"` : '';
+      hi++;
+      out.push(`<div${id} style="font-weight:600;font-size:${19 - lv * 2}px;margin:14px 0 6px">${inline(m[2])}</div>`);
+      continue;
+    }
+    out.push('<div style="margin:4px 0;line-height:1.75">' + inline(t) + '</div>');
   }
-  if (inList) out.push('</ul>');
+  closeList();
   return out.join('');
 }
+
 
 export default {
   id: 'docs',
@@ -89,6 +217,8 @@ export default {
   curPath: '',
   lastText: '',
   lastFile: null,
+  docId: 0,
+  docSel: new Set(),
 
   mount(el) {
     this.el = el;
@@ -154,6 +284,73 @@ export default {
         </div>
 
         <div class="panel">
+          <h3>写作台 <span style="font-weight:400;font-size:12px;color:var(--ink-3)">
+            Markdown · 左边写右边看 · 保存即成版本</span></h3>
+
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+            <input id="docQ" placeholder="搜文档：标题 + 正文全文都搜" style="flex:1;min-width:180px">
+            <button class="btn" id="btnDocSearch" style="height:32px;padding:0 12px">搜</button>
+            <button class="btn" id="btnDocNew" style="height:32px;padding:0 12px">新建</button>
+          </div>
+          <div id="docList" class="doc-list"></div>
+
+          <div id="wsArea" style="display:none;margin-top:10px">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input id="wsTitle" placeholder="文档标题" style="flex:1;min-width:160px">
+              <span id="wsMeta" class="ws-meta"></span>
+            </div>
+            <div class="ws-tools">
+              <select id="wsTpl" class="ws-sel" title="文档模板：一键铺好骨架">
+                <option value="">文档模板…</option>
+                <option value="weekly">周报</option>
+                <option value="diary">日记</option>
+                <option value="read">读书笔记</option>
+              </select>
+              <button class="btn" id="btnTbl">表格</button>
+              <button class="btn" id="btnOcrIns">OCR 插图</button>
+              <button class="btn" id="btnPdf">导出 PDF</button>
+              <button class="btn primary" id="btnWsSave">保存</button>
+              <button class="btn" id="btnHist">版本历史</button>
+              <button class="btn" id="btnBatch">批量转 Word</button>
+              <button class="btn" id="btnWsClose">关闭</button>
+            </div>
+
+            <div id="tblBox" class="ws-drawer" style="display:none">
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <span class="note" style="margin:0">数据行</span>
+                <input id="tblR" type="number" value="3" min="1" max="20" style="width:58px">
+                <span class="note" style="margin:0">列</span>
+                <input id="tblC" type="number" value="3" min="1" max="8" style="width:58px">
+                <button class="btn" id="btnTblBuild" style="height:28px;padding:0 10px;font-size:12px">搭表</button>
+                <button class="btn primary" id="btnTblIns" style="height:28px;padding:0 10px;font-size:12px">插入正文</button>
+                <button class="btn" id="btnTblX" style="height:28px;padding:0 10px;font-size:12px">收起</button>
+              </div>
+              <div id="tblGrid" class="tbl-grid"></div>
+            </div>
+
+            <div id="ocrBox" class="ws-drawer" style="display:none">
+              <div style="display:flex;gap:6px">
+                <input id="ocrPath" placeholder="图片路径（png / jpg / webp / bmp）" style="flex:1">
+                <button class="btn primary" id="btnOcrGo" style="height:30px;padding:0 12px;font-size:12px">识别并插入</button>
+              </div>
+              <div id="ocrSt" class="note" style="margin-top:6px"></div>
+            </div>
+
+            <div class="ws-grid">
+              <textarea id="wsMd" spellcheck="false"
+                placeholder="# 标题&#10;&#10;左边写 Markdown，右边实时渲染。&#10;&#10;## 小节&#10;- 要点&#10;&#10;| 列 | 列 |&#10;|---|---|&#10;| a | b |"></textarea>
+              <div class="ws-side">
+                <div id="wsToc" class="ws-toc"></div>
+                <div id="wsPrev" class="ws-prev"></div>
+              </div>
+            </div>
+
+            <div id="wsHist" style="display:none;margin-top:8px"></div>
+            <div id="wsBatchOut" style="margin-top:8px"></div>
+          </div>
+        </div>
+
+        <div class="panel">
           <h3>用 WPS 打开</h3>
           <div class="note" id="wpsInfo">检测中…</div>
         </div>
@@ -201,6 +398,27 @@ export default {
       b.style.display = b.style.display === 'none' ? '' : 'none';
     };
     el.querySelector('#btnTpl').onclick = () => this.tplFill();
+
+    // 写作台（F 域）
+    el.querySelector('#btnDocSearch').onclick = () => this.docsLoad(el.querySelector('#docQ').value.trim());
+    el.querySelector('#docQ').onkeydown = (e) => {
+      if (e.key === 'Enter') this.docsLoad(el.querySelector('#docQ').value.trim());
+    };
+    el.querySelector('#btnDocNew').onclick = () => this.docNew();
+    el.querySelector('#btnWsClose').onclick = () => { el.querySelector('#wsArea').style.display = 'none'; };
+    el.querySelector('#wsMd').oninput = () => this.renderPrev();
+    el.querySelector('#wsTpl').onchange = (e) => this.applyTpl(e.target.value, e.target);
+    el.querySelector('#btnTbl').onclick = () => this.toggleDrawer('tblBox');
+    el.querySelector('#btnTblBuild').onclick = () => this.tblBuild();
+    el.querySelector('#btnTblIns').onclick = () => this.tblIns();
+    el.querySelector('#btnTblX').onclick = () => { el.querySelector('#tblBox').style.display = 'none'; };
+    el.querySelector('#btnOcrIns').onclick = () => this.toggleDrawer('ocrBox');
+    el.querySelector('#btnOcrGo').onclick = () => this.ocrInsert();
+    el.querySelector('#btnPdf').onclick = () => this.exportPdf();
+    el.querySelector('#btnWsSave').onclick = () => this.docSave();
+    el.querySelector('#btnHist').onclick = () => this.hist();
+    el.querySelector('#btnBatch').onclick = () => this.batch();
+    this.docsLoad('');
 
     this.checkWps();
   },
@@ -491,6 +709,276 @@ export default {
     box.querySelector('#btnInWb').onclick = () => {
       window.WB.go('files', { q: d.file });
     };
+  },
+
+  // ---------- 写作台（F 域 53-62） ----------
+
+  toggleDrawer(id) {
+    const b = this.el.querySelector('#' + id);
+    b.style.display = b.style.display === 'none' ? '' : 'none';
+  },
+
+  async docsLoad(q) {
+    const box = this.el.querySelector('#docList');
+    box.innerHTML = '<div class="note">读取中…</div>';
+    const d = await api('/api/docs/list?q=' + encodeURIComponent(q || '') + '&limit=200');
+    const rows = d.rows || [];
+    if (!rows.length) {
+      box.innerHTML = '<div class="note">'
+        + (q ? '没搜到。换个词试试。' : '还没有文档。点「新建」开始写。') + '</div>';
+      return;
+    }
+    box.innerHTML = rows.map((r) => `
+      <div class="doc-row" data-id="${r.id}">
+        <input type="checkbox" class="doc-ck" data-id="${r.id}" title="勾上可批量转换">
+        <div style="flex:1;min-width:0">
+          <div class="doc-t">${r.fav ? '★ ' : ''}${esc(r.title || '未命名')}</div>
+          <div class="doc-s">${esc(r.snippet || '')}</div>
+          <div class="doc-m">${r.chars} 字 · ${esc(r.updated ? new Date(r.updated * 1000).toLocaleString() : '')}</div>
+        </div>
+        <button class="btn doc-open" data-id="${r.id}" style="height:26px;padding:0 8px;font-size:11.5px">打开</button>
+        <button class="btn doc-fav" data-id="${r.id}" style="height:26px;padding:0 8px;font-size:11.5px">${r.fav ? '取消收藏' : '收藏'}</button>
+        <button class="btn doc-del" data-id="${r.id}" style="height:26px;padding:0 8px;font-size:11.5px">删</button>
+      </div>`).join('');
+    box.querySelectorAll('.doc-open').forEach((b) => {
+      b.onclick = () => this.docOpen(Number(b.dataset.id));
+    });
+    box.querySelectorAll('.doc-fav').forEach((b) => {
+      b.onclick = async () => {
+        await post('/api/docs/fav', { id: Number(b.dataset.id) });
+        this.docsLoad(this.el.querySelector('#docQ').value.trim());
+      };
+    });
+    box.querySelectorAll('.doc-del').forEach((b) => {
+      b.onclick = async () => {
+        await post('/api/docs/del', { id: Number(b.dataset.id) });
+        toast('已删除');
+        this.docsLoad(this.el.querySelector('#docQ').value.trim());
+      };
+    });
+    box.querySelectorAll('.doc-ck').forEach((c) => {
+      c.onchange = () => {
+        const id = Number(c.dataset.id);
+        if (c.checked) this.docSel.add(id); else this.docSel.delete(id);
+      };
+    });
+  },
+
+  docNew() {
+    this.docId = 0;
+    const el = this.el;
+    el.querySelector('#wsArea').style.display = '';
+    el.querySelector('#wsTitle').value = '';
+    el.querySelector('#wsMd').value = '';
+    el.querySelector('#wsTpl').value = '';
+    el.querySelector('#wsHist').style.display = 'none';
+    el.querySelector('#wsBatchOut').innerHTML = '';
+    this.renderPrev();
+    el.querySelector('#wsMd').focus();
+  },
+
+  applyTpl(key, sel) {
+    const t = DOC_TPLS[key];
+    if (!t) return;
+    const el = this.el;
+    const ta = el.querySelector('#wsMd');
+    if (ta.value.trim() && !window.confirm('正文里已经有内容了，用模板覆盖掉？')) { sel.value = ''; return; }
+    ta.value = t.md;
+    if (!el.querySelector('#wsTitle').value.trim()) el.querySelector('#wsTitle').value = t.name;
+    sel.value = '';
+    this.renderPrev();
+  },
+
+  async docOpen(id) {
+    const d = await api('/api/docs/get?id=' + id);
+    if (!d.ok) { toast(d.error || '打不开'); return; }
+    this.docId = id;
+    const el = this.el;
+    el.querySelector('#wsArea').style.display = '';
+    el.querySelector('#wsTitle').value = d.row.title || '';
+    el.querySelector('#wsMd').value = d.row.md || '';
+    el.querySelector('#wsHist').style.display = 'none';
+    el.querySelector('#wsBatchOut').innerHTML = '';
+    this.renderPrev();
+  },
+
+  /* 54 双栏实时预览 + 59 大纲目录 + 60 字数统计，一次渲染全出来 */
+  renderPrev() {
+    const el = this.el;
+    const md = el.querySelector('#wsMd').value;
+    const prev = el.querySelector('#wsPrev');
+    const toc = el.querySelector('#wsToc');
+    const meta = el.querySelector('#wsMeta');
+    prev.innerHTML = mdHtml(md, true);
+    const c = wsCount(md);
+    meta.textContent = `${c.total} 字（中文 ${c.cjk} + 词 ${c.words}）· ${c.lines} 行 · 约读 ${c.mins} 分钟`;
+    const ol = wsOutline(md);
+    toc.innerHTML = '<div class="ws-toc-t">大纲</div>'
+      + (ol.length
+        ? ol.map((o, i) => `<div class="ws-toc-i lv${o.lv}" data-i="${i}">${esc(o.text)}</div>`).join('')
+        : '<div class="note" style="margin:0">写了 ## 标题就会出现目录</div>');
+    toc.querySelectorAll('.ws-toc-i').forEach((d) => {
+      d.onclick = () => {
+        const t = prev.querySelector('#hh' + d.dataset.i);
+        if (t) t.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      };
+    });
+  },
+
+  async docSave() {
+    const el = this.el;
+    const md = el.querySelector('#wsMd').value;
+    const title = el.querySelector('#wsTitle').value.trim();
+    if (!md.trim() && !title) { toast('空文档不用存'); return; }
+    const d = await post('/api/docs/save', { id: this.docId || 0, title, md, note: '手动保存' });
+    if (!d.ok) { toast(d.error || '存失败'); return; }
+    this.docId = d.id;
+    toast(d.created ? '已新建' : '已保存（自动留下一个版本）');
+    this.docsLoad(el.querySelector('#docQ').value.trim());
+  },
+
+  /* 55 版本历史：看 / 回滚 */
+  async hist() {
+    if (!this.docId) { toast('先保存一次，才有版本历史'); return; }
+    const el = this.el;
+    const box = el.querySelector('#wsHist');
+    const d = await api('/api/docs/snaps?id=' + this.docId);
+    const rows = d.rows || [];
+    box.style.display = '';
+    box.innerHTML = `<div class="ws-toc-t">版本历史 · ${rows.length} 个快照（每次保存自动留一个）</div>`
+      + (rows.length ? rows.map((r) => `
+        <div class="snap-row" data-sid="${r.id}">
+          <span style="flex:1">${esc(new Date(r.ts * 1000).toLocaleString())}
+            <span style="color:var(--ink-3)">· ${r.chars} 字${r.note ? ' · ' + esc(r.note) : ''}</span></span>
+          <button class="btn sn-view" data-sid="${r.id}" style="height:24px;padding:0 8px;font-size:11.5px">看</button>
+          <button class="btn sn-back" data-sid="${r.id}" style="height:24px;padding:0 8px;font-size:11.5px">回滚</button>
+        </div>`).join('') : '<div class="note">还没有快照</div>');
+    box.querySelectorAll('.sn-view').forEach((b) => {
+      b.onclick = async () => {
+        const r = await api('/api/docs/snap?sid=' + b.dataset.sid);
+        if (!r.ok) { toast('取不到这一版'); return; }
+        el.querySelector('#wsMd').value = r.row.md || '';
+        this.renderPrev();
+        toast('那一版已放进编辑器（还没保存，满意再点保存）');
+      };
+    });
+    box.querySelectorAll('.sn-back').forEach((b) => {
+      b.onclick = async () => {
+        if (!window.confirm('回滚到这一版？当前正文会先自动备份成一个新快照，不会丢。')) return;
+        const r = await post('/api/docs/restore', { id: this.docId, sid: Number(b.dataset.sid) });
+        if (!r.ok) { toast(r.error || '回滚失败'); return; }
+        toast('已回滚（当前这版已自动备份）');
+        await this.docOpen(this.docId);
+        this.hist();
+      };
+    });
+  },
+
+  /* 58 表格编辑器：搭一张网格，填完变 Markdown 插进正文 */
+  tblBuild() {
+    const el = this.el;
+    const r = Math.max(1, Math.min(20, Number(el.querySelector('#tblR').value) || 3));
+    const c = Math.max(1, Math.min(8, Number(el.querySelector('#tblC').value) || 3));
+    let html = '<div class="tbl-row"><span class="tbl-h">表头</span>';
+    for (let j = 0; j < c; j++) html += `<input class="tbl-cell" data-r="0" data-c="${j}" placeholder="列${j + 1}">`;
+    html += '</div>';
+    for (let i = 1; i <= r; i++) {
+      html += `<div class="tbl-row"><span class="tbl-h">${i}</span>`;
+      for (let j = 0; j < c; j++) html += `<input class="tbl-cell" data-r="${i}" data-c="${j}">`;
+      html += '</div>';
+    }
+    el.querySelector('#tblGrid').innerHTML = html;
+  },
+
+  tblIns() {
+    const cells = this.el.querySelectorAll('#tblGrid .tbl-cell');
+    if (!cells.length) { this.tblBuild(); toast('先点「搭表」'); return; }
+    const map = {};
+    let maxR = 0;
+    let maxC = 0;
+    cells.forEach((x) => {
+      const r = Number(x.dataset.r);
+      const c = Number(x.dataset.c);
+      maxR = Math.max(maxR, r);
+      maxC = Math.max(maxC, c);
+      map[r] = map[r] || {};
+      map[r][c] = x.value;
+    });
+    const rows = [];
+    for (let i = 0; i <= maxR; i++) {
+      const row = [];
+      for (let j = 0; j <= maxC; j++) row.push((map[i] && map[i][j]) || '');
+      rows.push(row);
+    }
+    const md = gridToMd(rows);
+    const ta = this.el.querySelector('#wsMd');
+    const s = ta.selectionStart || ta.value.length;
+    const pad = s && ta.value[s - 1] !== '\n' ? '\n\n' : '';
+    ta.value = ta.value.slice(0, s) + pad + md + '\n' + ta.value.slice(s);
+    this.renderPrev();
+    toast('表格已插入正文');
+  },
+
+  /* 57 OCR 入口：图片识别的字直接插到光标处 */
+  async ocrInsert() {
+    const p = this.el.querySelector('#ocrPath').value.trim();
+    const st = this.el.querySelector('#ocrSt');
+    if (!p) { toast('填个图片路径'); return; }
+    st.innerHTML = '<span class="tag">识别中，十几秒…</span>';
+    const d = await post('/api/ocr/read', { path: p });
+    if (!d.ok) { st.innerHTML = `<span class="tag err">${esc(d.error)}</span>`; return; }
+    st.innerHTML = `<span class="tag ok">读出来了（${esc(d.model || '')}）</span>`;
+    const ta = this.el.querySelector('#wsMd');
+    const s = ta.selectionStart || ta.value.length;
+    const ins = '\n> [OCR] ' + (d.name || '') + '\n\n' + (d.text || '').trim() + '\n';
+    ta.value = ta.value.slice(0, s) + ins + ta.value.slice(s);
+    this.renderPrev();
+  },
+
+  /* 53 导出 PDF：走浏览器打印管线（打印目标选「另存为 PDF」） */
+  exportPdf() {
+    const md = this.el.querySelector('#wsMd').value;
+    const title = this.el.querySelector('#wsTitle').value.trim() || '文档';
+    if (!md.trim()) { toast('没有内容可以导出'); return; }
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
+      <style>
+        body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+             max-width:760px;margin:32px auto;padding:0 20px;line-height:1.75;color:#111}
+        h1,h2,h3,h4{line-height:1.3}
+        table{border-collapse:collapse;width:100%;margin:10px 0}
+        th,td{border:1px solid #bbb;padding:6px 8px;font-size:14px;text-align:left}
+        th{background:#f2f2f2}
+        blockquote{border-left:3px solid #ccc;margin:8px 0;padding:4px 12px;color:#555}
+        @page{margin:16mm}
+      </style></head><body>
+      <div id="doc">${mdHtml(md)}</div>
+      <script>window.onload=function(){setTimeout(function(){window.print();},120);};<\/script>
+      </body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) { toast('浏览器拦了新窗口，允许弹窗后再试'); return; }
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    toast('已打开打印视图，目标选「另存为 PDF」');
+  },
+
+  /* 61 批量转换：勾选多篇 → 一次转成 docx */
+  async batch() {
+    const el = this.el;
+    const ids = Array.from(this.docSel || []);
+    const out = el.querySelector('#wsBatchOut');
+    if (!ids.length) {
+      out.innerHTML = '<div class="note">先在下面的列表里勾选要转的文档（可多选），再点这里。</div>';
+      return;
+    }
+    out.innerHTML = `<div class="note">正在转 ${ids.length} 份…</div>`;
+    const d = await post('/api/docs/batch', { ids, kind: 'word' });
+    if (!d.ok) { out.innerHTML = `<div class="note">${esc(d.error || '失败')}</div>`; return; }
+    out.innerHTML = `<div class="note">成功 ${d.n} 份${d.nfail ? '，失败 ' + d.nfail + ' 份' : ''}</div>`
+      + (d.made || []).map((m) => `<div class="batch-row">✓ ${esc(m.title)}
+          <span style="color:var(--ink-3)">· ${esc(m.file)} · ${esc(m.note || '')}</span>
+          <a href="${m.url}" style="margin-left:8px">下载</a></div>`).join('')
+      + (d.failed || []).map((f) => `<div class="batch-row err">× ${esc(String(f.title || f.id))} — ${esc(f.error)}</div>`).join('');
   },
 
   async checkWps() {
