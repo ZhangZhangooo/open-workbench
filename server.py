@@ -873,6 +873,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"rows": STORE.today_pending(parse_qs(u.query).get("day", [""])[0] or DAY())})
             return
 
+        if p == "/api/today/stats":
+            self._json(STORE.today_stats(30))
+            return
+
+        if p == "/api/today/templates":
+            self._json({"rows": STORE.today_tpl_list()})
+            return
+
+        if p == "/api/today/review":
+            self._json(STORE.today_review(parse_qs(u.query).get("day", [""])[0] or DAY()))
+            return
+
         if p == "/api/daylog":
             day = parse_qs(u.query).get("day", [""])[0] or DAY()
             self._json({"day": day, "text": STORE.daylog_get(day)})
@@ -1176,9 +1188,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == "/api/today/add":
+            b_pri = body.get("priority")
             self._json(STORE.today_add(
                 body.get("day") or DAY(), body.get("text", "").strip(),
                 int(body.get("project_id", 0) or 0),
+                priority=1 if b_pri is None else int(b_pri),
+                est=body.get("est", 0) or 0,
+                note=body.get("note", "") or "",
+                repeat=body.get("repeat", "") or "",
+                parent_id=int(body.get("parent_id", 0) or 0),
             ))
             return
 
@@ -1192,6 +1210,53 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/today/roll":
             self._json(STORE.today_roll(body.get("from", ""), body.get("to", "") or DAY()))
+            return
+
+        if p == "/api/today/priority":
+            self._json(STORE.today_priority(int(body.get("id", 0)), int(body.get("p", 1))))
+            return
+
+        if p == "/api/today/est":
+            self._json(STORE.today_est(int(body.get("id", 0)), body.get("est", 0)))
+            return
+
+        if p == "/api/today/note":
+            self._json(STORE.today_note(int(body.get("id", 0)), body.get("note", "")))
+            return
+
+        if p == "/api/today/sub":
+            self._json(STORE.today_add(
+                body.get("day") or DAY(), body.get("text", "").strip(),
+                parent_id=int(body.get("parent_id", 0) or 0),
+            ))
+            return
+
+        if p == "/api/today/defer":
+            self._json(STORE.today_defer(int(body.get("id", 0)), body.get("to", "") or ""))
+            return
+
+        if p == "/api/today/batch":
+            self._json(STORE.today_batch(body.get("ids") or [], body.get("op", "")))
+            return
+
+        if p == "/api/today/pomo":
+            if body.get("op") == "start":
+                self._json(STORE.today_pomo_start(int(body.get("id", 0))))
+            else:
+                self._json(STORE.today_pomo_stop())
+            return
+
+        if p == "/api/today/template/save":
+            self._json(STORE.today_tpl_save(body.get("name", ""), body.get("items") or []))
+            return
+
+        if p == "/api/today/template/del":
+            self._json(STORE.today_tpl_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/today/template/apply":
+            self._json(STORE.today_tpl_apply(
+                int(body.get("id", 0)), body.get("day") or DAY()))
             return
 
         if p == "/api/daylog/save":
@@ -1479,6 +1544,7 @@ class Handler(BaseHTTPRequestHandler):
                 int(body.get("project_id", 0) or 0),
                 int(body.get("task_id", 0) or 0),
                 body.get("title", ""),
+                int(body.get("today_id", 0) or 0),
             ))
             return
 

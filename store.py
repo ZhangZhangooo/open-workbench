@@ -180,6 +180,12 @@ CREATE TABLE IF NOT EXISTS connector_log (
     ok INTEGER DEFAULT 0,
     error TEXT
 );
+CREATE TABLE IF NOT EXISTS task_tpl (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    items TEXT,
+    created REAL
+);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -188,6 +194,15 @@ ALTERS = [
     "ALTER TABLE today ADD COLUMN created REAL",
     "ALTER TABLE projects ADD COLUMN note TEXT",
     "ALTER TABLE tasks ADD COLUMN due TEXT",
+    # B 域：今日/任务进阶
+    "ALTER TABLE today ADD COLUMN priority INTEGER DEFAULT 1",
+    "ALTER TABLE today ADD COLUMN parent_id INTEGER DEFAULT 0",
+    "ALTER TABLE today ADD COLUMN repeat TEXT DEFAULT ''",
+    "ALTER TABLE today ADD COLUMN est REAL DEFAULT 0",
+    "ALTER TABLE today ADD COLUMN act REAL DEFAULT 0",
+    "ALTER TABLE today ADD COLUMN note TEXT DEFAULT ''",
+    "ALTER TABLE today ADD COLUMN done_at REAL",
+    "ALTER TABLE pomodoro ADD COLUMN today_id INTEGER DEFAULT 0",
 ]
 
 PROMPT_SCHEMA = """
@@ -218,6 +233,11 @@ CREATE TABLE IF NOT EXISTS checkins (
 def _today() -> str:
     import datetime as _dt
     return _dt.date.today().isoformat()
+
+
+def _tomorrow() -> str:
+    import datetime as _dt
+    return (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
 
 
 class Store:
@@ -266,27 +286,93 @@ class Store:
     # ---- 今日三件事 ----
 
     def today_list(self, day: str) -> list[dict]:
-        return self._run(
+        rows = self._run(
             "SELECT t.*, COALESCE(p.name,'') AS project FROM today t "
             "LEFT JOIN projects p ON p.id=t.project_id "
-            "WHERE t.day=? ORDER BY t.sort, t.id", (day,)
+            "WHERE t.day=? ORDER BY t.done, t.priority, t.sort, t.id", (day,)
         )
+        # 子任务进度统计挂到父任务上（n_sub / n_sub_done）
+        subs = {}
+        for r in rows:
+            pid = int(r.get("parent_id") or 0)
+            if pid:
+                s = subs.setdefault(pid, [0, 0])
+                s[0] += 1
+                if r["done"]:
+                    s[1] += 1
+        for r in rows:
+            c = subs.get(r["id"])
+            if c:
+                r["n_sub"], r["n_sub_done"] = c
+        return rows
 
-    def today_add(self, day: str, text: str, project_id: int = 0) -> dict:
+    def today_add(self, day: str, text: str, project_id: int = 0,
+                  priority: int = 1, est=0, note: str = "",
+                  repeat: str = "", parent_id: int = 0) -> dict:
+        pri = 1 if priority is None else int(priority)   # 0 是合法优先级（P0），别被 or 吃掉
         self._run(
-            "INSERT INTO today (day, text, sort, project_id, created) "
-            "VALUES (?,?,(SELECT COALESCE(MAX(sort),0)+1 FROM today WHERE day=?),?,?)",
-            (day, text, day, int(project_id or 0), time.time()),
+            "INSERT INTO today (day, text, sort, project_id, created, priority, est, note, repeat, parent_id) "
+            "VALUES (?,?,(SELECT COALESCE(MAX(sort),0)+1 FROM today WHERE day=?),?,?,?,?,?,?,?)",
+            (day, text, day, int(project_id or 0), time.time(),
+             pri, float(est or 0), note or "",
+             repeat or "", int(parent_id or 0)),
             False,
         )
         return {"ok": True}
 
     def today_toggle(self, id_: int, done: int) -> dict:
-        self._run("UPDATE today SET done=? WHERE id=?", (done, id_), False)
+        rows = self._run("SELECT * FROM today WHERE id=?", (id_,))
+        if not rows:
+            return {"ok": False, "error": "没有这条任务"}
+        row = rows[0]
+        self._run(
+            "UPDATE today SET done=?, done_at=? WHERE id=?",
+            (done, time.time() if done else None, id_), False,
+        )
+        # 重复任务：完成后在下一个周期自动重建一份新的
+        if done and row.get("repeat") and not int(row.get("parent_id") or 0):
+            nd = self._next_repeat_day(row["day"], row["repeat"])
+            if nd:
+                rp = row.get("priority")
+                self.today_add(nd, row["text"], row.get("project_id") or 0,
+                               1 if rp is None else int(rp), row.get("est") or 0,
+                               "", row["repeat"], 0)
+        # 父子联动：子任务全勾 → 父任务自动完成；取消一个 → 父任务自动取消
+        pid = int(row.get("parent_id") or 0)
+        if pid:
+            n, ndone = self.conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(done),0) FROM today WHERE parent_id=?", (pid,)
+            ).fetchone()
+            if n and ndone >= n:
+                self._run("UPDATE today SET done=1, done_at=? WHERE id=? AND done=0",
+                          (time.time(), pid), False)
+            else:
+                self._run("UPDATE today SET done=0, done_at=NULL WHERE id=?", (pid,), False)
         return {"ok": True}
 
+    def _next_repeat_day(self, day: str, repeat: str) -> str:
+        import datetime as _dt
+        try:
+            d = _dt.date.fromisoformat(day)
+        except (ValueError, TypeError):
+            return ""
+        if repeat == "daily":
+            return (d + _dt.timedelta(days=1)).isoformat()
+        if repeat == "weekly":
+            return (d + _dt.timedelta(days=7)).isoformat()
+        if repeat == "monthly":
+            m, y = d.month + 1, d.year
+            if m > 12:
+                m, y = 1, y + 1
+            try:
+                return d.replace(year=y, month=m).isoformat()
+            except ValueError:  # 31 号落进没有 31 号的月份
+                return _dt.date(y, m, 28).isoformat()
+        return ""
+
     def today_del(self, id_: int) -> dict:
-        self._run("DELETE FROM today WHERE id=?", (id_,), False)
+        # 连子任务一起删
+        self._run("DELETE FROM today WHERE id=? OR parent_id=?", (id_, id_), False)
         return {"ok": True}
 
     def today_roll(self, old: str, new: str) -> dict:
@@ -301,6 +387,144 @@ class Store:
         return self._run(
             "SELECT * FROM today WHERE day=? AND done=0 ORDER BY sort, id", (day,)
         )
+
+    # ---- 任务进阶（优先级 / 子任务 / 重复 / 用时 / 番茄 / 批量 / 模板 / 统计）----
+
+    def today_priority(self, id_: int, p: int) -> dict:
+        self._run("UPDATE today SET priority=? WHERE id=?", (int(p), id_), False)
+        return {"ok": True}
+
+    def today_est(self, id_: int, est) -> dict:
+        self._run("UPDATE today SET est=? WHERE id=?", (float(est or 0), id_), False)
+        return {"ok": True}
+
+    def today_note(self, id_: int, note: str) -> dict:
+        self._run("UPDATE today SET note=? WHERE id=?", ((note or "").strip(), id_), False)
+        return {"ok": True}
+
+    def today_defer(self, id_: int, to_day: str = "") -> dict:
+        """把任务（连子任务）推到另一天，默认明天。"""
+        if not to_day:
+            to_day = _tomorrow()
+        self._run("UPDATE today SET day=? WHERE id=? OR parent_id=?",
+                  (to_day, id_, id_), False)
+        return {"ok": True, "to": to_day}
+
+    def today_batch(self, ids, op: str) -> dict:
+        if op not in ("done", "undone", "del", "defer"):
+            return {"ok": False, "error": "不支持的操作"}
+        ids = [int(i) for i in (ids or []) if i]
+        for i in ids:
+            if op == "done":
+                self.today_toggle(i, 1)
+            elif op == "undone":
+                self.today_toggle(i, 0)
+            elif op == "del":
+                self.today_del(i)
+            else:
+                self.today_defer(i)
+        return {"ok": True, "n": len(ids)}
+
+    def today_pomo_start(self, today_id: int) -> dict:
+        """对着某条任务开番茄；已有一条绑任务的番茄先自动结算。"""
+        rows = self._run("SELECT * FROM today WHERE id=?", (today_id,))
+        if not rows:
+            return {"ok": False, "error": "没有这条任务"}
+        r = self.pomodoro_running()
+        if r and int(r.get("today_id") or 0):
+            self.pomodoro_stop(r["id"])
+        cur = self.conn.execute(
+            "INSERT INTO pomodoro (project_id, task_id, title, today_id, started) VALUES (?,?,?,?,?)",
+            (0, 0, rows[0]["text"], int(today_id), time.time()),
+        )
+        self.conn.commit()
+        return {"ok": True, "id": cur.lastrowid, "started": time.time(), "today_id": int(today_id)}
+
+    def today_pomo_stop(self) -> dict:
+        """结算当前番茄；绑了任务的把分钟数记到任务 act 上。"""
+        r = self.pomodoro_running()
+        if not r:
+            return {"ok": False, "error": "没有正在进行的番茄"}
+        out = self.pomodoro_stop(r["id"])
+        tid = int(r.get("today_id") or 0)
+        return {"ok": True, "minutes": out.get("minutes", 0), "today_id": tid}
+
+    def today_stats(self, days: int = 30) -> dict:
+        """最近 N 天完成密度 + 完成连击。"""
+        import datetime as _dt
+        today = _dt.date.today()
+        out = []
+        for i in range(days - 1, -1, -1):
+            d = (today - _dt.timedelta(days=i)).isoformat()
+            n = self.conn.execute(
+                "SELECT COUNT(*) FROM today WHERE day=? AND done=1", (d,)).fetchone()[0]
+            out.append({"day": d, "n": n})
+        streak, d = 0, today
+        while True:
+            n = self.conn.execute(
+                "SELECT COUNT(*) FROM today WHERE day=? AND done=1", (d.isoformat(),)).fetchone()[0]
+            if n:
+                streak += 1
+                d -= _dt.timedelta(days=1)
+            elif d == today:
+                d -= _dt.timedelta(days=1)  # 今天还没完成不算断
+            else:
+                break
+        return {"streak": streak, "days": out}
+
+    def today_tpl_list(self) -> list[dict]:
+        return self._run("SELECT * FROM task_tpl ORDER BY id DESC")
+
+    def today_tpl_save(self, name: str, items) -> dict:
+        items = [i.strip() for i in (items or []) if isinstance(i, str) and i.strip()]
+        self._run(
+            "INSERT INTO task_tpl (name, items, created) VALUES (?,?,?)",
+            ((name or "").strip() or "模板", json.dumps(items, ensure_ascii=False), time.time()),
+            False,
+        )
+        return {"ok": True, "n": len(items)}
+
+    def today_tpl_del(self, id_: int) -> dict:
+        self._run("DELETE FROM task_tpl WHERE id=?", (id_,), False)
+        return {"ok": True}
+
+    def today_tpl_apply(self, id_: int, day: str) -> dict:
+        rows = self._run("SELECT * FROM task_tpl WHERE id=?", (id_,))
+        if not rows:
+            return {"ok": False, "error": "没有这个模板"}
+        try:
+            items = json.loads(rows[0]["items"] or "[]")
+        except (ValueError, TypeError):
+            items = []
+        for t in items:
+            if isinstance(t, str) and t.strip():
+                self.today_add(day, t.strip())
+        return {"ok": True, "n": len(items)}
+
+    def today_review(self, day: str) -> dict:
+        """一键日回顾的原料：完成/未完/番茄/捕捉/日程/日志，一次给全。"""
+        import datetime as _dt
+        rows = self._run(
+            "SELECT * FROM today WHERE day=? ORDER BY done, priority, sort, id", (day,))
+        done = [r["text"] for r in rows if r["done"]]
+        undone = [r["text"] for r in rows if not r["done"]]
+        try:
+            d0 = _dt.datetime.combine(_dt.date.fromisoformat(day), _dt.time.min).timestamp()
+        except (ValueError, TypeError):
+            d0 = 0
+        d1 = d0 + 86400
+        prow = self.conn.execute(
+            "SELECT COALESCE(SUM(minutes),0), COUNT(*) FROM pomodoro "
+            "WHERE ended IS NOT NULL AND started>=? AND started<?", (d0, d1)).fetchone()
+        cap = self.conn.execute(
+            "SELECT COUNT(*) FROM inbox WHERE created>=? AND created<?", (d0, d1)).fetchone()[0]
+        evs = self._run(
+            "SELECT start, end, title FROM events WHERE day=? ORDER BY start", (day,))
+        return {
+            "day": day, "done": done, "undone": undone,
+            "pomo_minutes": round(prow[0] or 0), "pomo_count": prow[1],
+            "captures": cap, "events": evs, "daylog": self.daylog_get(day),
+        }
 
     # ---- 今日什么事（按天一条的自由日志）----
 
@@ -798,21 +1022,27 @@ class Store:
 
     # ---- 番茄钟 ----
 
-    def pomodoro_start(self, project_id: int, task_id: int, title: str) -> dict:
+    def pomodoro_start(self, project_id: int, task_id: int, title: str, today_id: int = 0) -> dict:
         cur = self.conn.execute(
-            "INSERT INTO pomodoro (project_id, task_id, title, started) VALUES (?,?,?,?)",
-            (int(project_id or 0), int(task_id or 0), title or "", time.time()),
+            "INSERT INTO pomodoro (project_id, task_id, title, today_id, started) VALUES (?,?,?,?,?)",
+            (int(project_id or 0), int(task_id or 0), title or "",
+             int(today_id or 0), time.time()),
         )
         self.conn.commit()
         return {"ok": True, "id": cur.lastrowid, "started": time.time()}
 
     def pomodoro_stop(self, id_: int) -> dict:
-        rows = self._run("SELECT started FROM pomodoro WHERE id=?", (id_,))
+        rows = self._run("SELECT * FROM pomodoro WHERE id=?", (id_,))
         if not rows:
             return {"ok": False, "error": "没有这条记录"}
         mins = (time.time() - (rows[0]["started"] or time.time())) / 60.0
         self._run("UPDATE pomodoro SET ended=?, minutes=? WHERE id=?",
                   (time.time(), round(mins, 1), id_), False)
+        # 绑了任务的番茄：时长直接记到任务的「实际用时」上
+        tid = int(rows[0].get("today_id") or 0)
+        if tid:
+            self._run("UPDATE today SET act=COALESCE(act,0)+? WHERE id=?",
+                      (round(mins, 1), tid), False)
         return {"ok": True, "minutes": round(mins, 1)}
 
     def pomodoro_running(self) -> dict | None:
@@ -1031,4 +1261,6 @@ class Store:
         out = {}
         for t in ("inbox", "today", "notes", "links", "projects", "chats", "events", "meetings", "tasks", "habits", "kb"):
             out[t] = self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        out["today_undone"] = self.conn.execute(
+            "SELECT COUNT(*) FROM today WHERE done=0 AND day=?", (_today(),)).fetchone()[0]
         return out
