@@ -786,6 +786,92 @@ def serverchan_send(token: str, title: str, content: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def webhook_send(url: str, title: str, content: str, headers_json: str = "", body_tpl: str = "") -> dict:
+    """通用 Webhook：把 {title}/{content} 占位符填进模板 POST 出去。
+
+    url            必填，目标地址
+    headers_json   可选，自定义头（JSON 对象，如 {"Authorization":"Bearer x"}）
+    body_tpl       可选，JSON 模板字符串，含 {title} {content} {ts} 占位符；
+                   不填就发 {"title":..., "content":..., "ts":...}
+    """
+    url = (url or "").strip()
+    if not url:
+        return {"ok": False, "error": "没填 Webhook URL"}
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"ok": False, "error": "Webhook URL 必须以 http(s):// 开头"}
+
+    headers = {"Content-Type": "application/json"}
+    if headers_json and headers_json.strip():
+        try:
+            extra = json.loads(headers_json)
+            if isinstance(extra, dict):
+                headers.update({str(k): str(v) for k, v in extra.items()})
+        except json.JSONDecodeError:
+            return {"ok": False, "error": "自定义 Header 不是合法 JSON 对象"}
+
+    payload = {"title": title or "工作台", "content": content or "", "ts": int(time.time())}
+    if body_tpl and body_tpl.strip():
+        raw = body_tpl.replace("{title}", json.dumps(title or "工作台", ensure_ascii=False)[1:-1])
+        raw = raw.replace("{content}", json.dumps(content or "", ensure_ascii=False)[1:-1])
+        raw = raw.replace("{ts}", str(int(time.time())))
+        try:
+            json.loads(raw)  # 校验模板产物仍是合法 JSON
+        except json.JSONDecodeError:
+            return {"ok": False, "error": "Body 模板渲染后不是合法 JSON"}
+        data = raw.encode("utf-8")
+    else:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            code = r.getcode()
+            body = r.read().decode("utf-8", "ignore")[:200]
+        return {"ok": True, "msg": f"HTTP {code} {body}"}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "ignore")[:300]
+        return {"ok": False, "error": f"{e.code} {detail}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
+def smtp_send(c: dict, title: str, content: str) -> dict:
+    """SMTP 邮件推送：不靠第三方推送服务，用你自己的邮箱发给自己。
+
+    连接器字段：host / port / user / pass / to / ssl(默认 True 走 465 SSL)
+    """
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.header import Header
+
+    host = (c.get("host") or "").strip()
+    user = (c.get("user") or "").strip()
+    pwd = c.get("pass") or c.get("password") or ""
+    to = (c.get("to") or user).strip()
+    if not (host and user and pwd):
+        return {"ok": False, "error": "SMTP 没填全（host/user/授权码）"}
+    port = int(c.get("port") or 465)
+    use_ssl = c.get("ssl", True) if isinstance(c.get("ssl"), bool) else str(c.get("ssl", "1")) not in ("0", "false", "no")
+    try:
+        msg = MIMEText((content or "") or "（无正文）", "plain", "utf-8")
+        msg["Subject"] = Header(title or "工作台", "utf-8")
+        msg["From"] = user
+        msg["To"] = to
+        if use_ssl:
+            s = smtplib.SMTP_SSL(host, port, timeout=20)
+        else:
+            s = smtplib.SMTP(host, port, timeout=20)
+            s.starttls()
+        try:
+            s.login(user, pwd)
+            s.sendmail(user, [to], msg.as_string())
+        finally:
+            s.quit()
+        return {"ok": True, "msg": f"已发到 {to}"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 def connector_push(connector: dict, title: str, content: str) -> dict:
     """按连接器类型分发推送。新增类型在这里加 case 即可。"""
     ctype = (connector.get("type") or "").lower()
@@ -794,4 +880,13 @@ def connector_push(connector: dict, title: str, content: str) -> dict:
         return pushplus_send(token, title, content, connector.get("topic", ""))
     if ctype in ("serverchan", "sc", "server酱"):
         return serverchan_send(token, title, content)
+    if ctype in ("webhook", "hook", "http"):
+        return webhook_send(
+            connector.get("url") or connector.get("token") or "",
+            title, content,
+            connector.get("headers") or "",
+            connector.get("body") or "",
+        )
+    if ctype in ("smtp", "email", "mail"):
+        return smtp_send(connector, title, content)
     return {"ok": False, "error": f"不支持的连接器类型：{ctype}"}

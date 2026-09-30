@@ -127,6 +127,8 @@ window.WB = {
   refresh: () => refreshStatus(),
   recentLogs: () => logLines.slice(-14),
   requestNotify,
+  applyModuleCfg: (cfg) => applyModuleCfg(cfg),
+  readModuleCfg: () => JSON.parse(JSON.stringify(moduleCfg)),
 };
 
 // 注：AI（问一问）和文档页都不再单独占模块位，它们是 OpenClaw 页下的子标签，
@@ -200,7 +202,7 @@ function go(id, arg) {
   if (!built.has(id)) build(m);
   built.forEach((v, k) => v.el.classList.toggle('on', k === id));
   currentId = id;
-  $('#topTitle').textContent = m.name;
+  $('#topTitle').textContent = modLabel(m);
   window.__cur = id;
   document.querySelectorAll('.side-btn').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
   const e = built.get(id);
@@ -210,22 +212,50 @@ function go(id, arg) {
   post('/api/kv/set', { k: 'last_module', v: id });
 }
 
-let moduleOrder = null;   // 侧栏顺序（kv 持久化），null = 用默认
+/* ---------- 模块配置（机制内核）----------
+   kv: moduleConfig 存 {order:[], disabled:[], labels:{}}。
+   旧的 moduleOrder kv 在 boot 时迁移进来，不丢老布局。 */
+let moduleCfg = { order: null, disabled: [], labels: {} };
 let dragId = null;
+
+const modLabel = (m) => (moduleCfg.labels && moduleCfg.labels[m.id]) || m.name;
+const isEnabled = (m) => !(moduleCfg.disabled || []).includes(m.id);
+const visibleModules = () => MODULES.filter(isEnabled);
+const modOrder = () => (moduleCfg.order && moduleCfg.order.length)
+  ? moduleCfg.order.slice() : MODULES.map((m) => m.id);
+
+function applyModuleCfg(cfg) {
+  // 设置页保存后不刷新页面也能立刻生效
+  moduleCfg = {
+    order: (Array.isArray(cfg.order) && cfg.order.length) ? cfg.order.slice() : null,
+    disabled: (Array.isArray(cfg.disabled) ? cfg.disabled : [])
+      .filter((id) => MODULES.some((m) => m.id === id)),
+    labels: (cfg.labels && typeof cfg.labels === 'object') ? { ...cfg.labels } : {},
+  };
+  renderSide();
+  // 当前模块被关掉时跳到第一个可见模块，别停在看不见的页上
+  if (currentId && moduleCfg.disabled.includes(currentId)) {
+    const first = visibleModules()[0];
+    if (first) go(first.id);
+  }
+}
+
+function saveModuleCfg() {
+  post('/api/kv/set', { k: 'moduleConfig', v: JSON.stringify(moduleCfg) });
+}
 
 function renderSide() {
   const box = $('#mods');
   box.innerHTML = '';
-  const order = (moduleOrder && moduleOrder.length) ? moduleOrder : MODULES.map((m) => m.id);
-  order.forEach((id) => {
+  modOrder().forEach((id) => {
     const m = MODULES.find((x) => x.id === id);
-    if (!m) return;
+    if (!m || !isEnabled(m)) return;
     const b = document.createElement('button');
     b.className = 'side-btn';
     b.dataset.id = m.id;
     b.draggable = true;
     b.title = '拖动可排序';
-    b.innerHTML = `<span>${esc(m.name)}</span><span class="badge" data-badge="${m.id}"></span>`;
+    b.innerHTML = `<span>${esc(modLabel(m))}</span><span class="badge" data-badge="${m.id}"></span>`;
     b.onclick = () => go(m.id);
     b.addEventListener('dragstart', (e) => { dragId = m.id; e.dataTransfer.effectAllowed = 'move'; });
     b.addEventListener('dragover', (e) => e.preventDefault());
@@ -239,14 +269,14 @@ function renderSide() {
 
 function reorderSide(targetId) {
   if (!dragId || dragId === targetId) return;
-  const base = (moduleOrder && moduleOrder.length) ? moduleOrder.slice() : MODULES.map((m) => m.id);
+  const base = modOrder();
   const from = base.indexOf(dragId);
   const to = base.indexOf(targetId);
   if (from < 0 || to < 0) return;
   base.splice(to, 0, base.splice(from, 1)[0]);
-  moduleOrder = base;
+  moduleCfg.order = base;
   renderSide();
-  post('/api/kv/set', { k: 'moduleOrder', v: JSON.stringify(base) });
+  saveModuleCfg();
   toast('顺序已保存');
 }
 
@@ -301,9 +331,10 @@ let cmdTimer = null;
 async function updateCmd(q) {
   const items = [];
 
-  MODULES.forEach((m) => {
-    if (!q || m.name.includes(q)) {
-      items.push({ title: '前往 ' + m.name, hint: '模块', run: () => go(m.id) });
+  visibleModules().forEach((m) => {
+    const label = modLabel(m);
+    if (!q || label.includes(q) || (m.name && m.name.includes(q))) {
+      items.push({ title: '前往 ' + label, hint: '模块', run: () => go(m.id) });
     }
     (typeof m.commands === 'function' ? m.commands() : []).forEach((c) => {
       if (!q || c.title.includes(q)) items.push(c);
@@ -487,11 +518,11 @@ window.addEventListener('keydown', (e) => {
     closeLaunch();
     return;
   }
-  // Alt+1..9 前九个，Alt+0 第十个，- 和 = 接第十一、十二个（模块超过 10 个时够用）
+  // Alt+1..9 前九个可见模块，Alt+0 第十个，- 和 = 接第十一、十二个
   if (e.altKey && /^[0-9\-=]$/.test(e.key)) {
     const map = { '0': 9, '-': 10, '=': 11 };
     const i = map[e.key] !== undefined ? map[e.key] : +e.key - 1;
-    const m = MODULES[i];
+    const m = visibleModules()[i];
     if (m) { e.preventDefault(); go(m.id); }
   }
 });
@@ -607,23 +638,37 @@ async function boot() {
 }
 
 async function bootRest() {
-  let theme = {}, last = {}, ord = {};
+  let theme = {}, last = {}, ord = {}, mc = {};
   try {
-    [theme, last, ord] = await Promise.all([
+    [theme, last, ord, mc] = await Promise.all([
       api('/api/kv?k=theme'),
       api('/api/kv?k=last_module'),
       api('/api/kv?k=moduleOrder'),
+      api('/api/kv?k=moduleConfig'),
     ]);
   } catch (e) { console.error('[boot] kv 读取失败', e); }
   if (theme && theme.v === 'light') document.body.classList.add('light');
   try {
-    const o = JSON.parse((ord && ord.v) || 'null');
-    if (Array.isArray(o) && o.length) {
-      moduleOrder = o;
-      // 把新注册的模块补到侧栏末尾（老顺序里没有的 id）
-      for (const m of MODULES) if (!moduleOrder.includes(m.id)) moduleOrder.push(m.id);
+    const c = JSON.parse((mc && mc.v) || 'null');
+    if (c && (Array.isArray(c.order) || Array.isArray(c.disabled) || c.labels)) {
+      moduleCfg = {
+        order: (Array.isArray(c.order) && c.order.length) ? c.order : null,
+        disabled: Array.isArray(c.disabled) ? c.disabled : [],
+        labels: (c.labels && typeof c.labels === 'object') ? c.labels : {},
+      };
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* 配置坏了就当没配 */ }
+  if (!moduleCfg.order) {
+    // 老布局迁移：旧 moduleOrder kv 并入新配置，拖过的顺序不丢
+    try {
+      const o = JSON.parse((ord && ord.v) || 'null');
+      if (Array.isArray(o) && o.length) moduleCfg.order = o;
+    } catch (e) { /* ignore */ }
+  }
+  // 升级后新注册的模块补到末尾，保证可见
+  const base = modOrder();
+  for (const m of MODULES) if (!base.includes(m.id)) base.push(m.id);
+  moduleCfg.order = base;
   await loadNotified();
   finishBoot(last && last.v);
 }
@@ -632,7 +677,9 @@ function finishBoot(lastModule) {
   renderSide();
   mountSyncBadge();
   log('ok', 'boot', 'workbench online');
-  go(lastModule && MODULES.some((m) => m.id === lastModule) ? lastModule : 'home');
+  let start = (lastModule && MODULES.some((m) => m.id === lastModule)) ? lastModule : 'home';
+  if (moduleCfg.disabled.includes(start)) start = (visibleModules()[0] || {}).id || start;
+  go(start);
   refreshStatus();
   MODULES.forEach((m) => { if (m.boot) m.boot(); });
   notifyPoll();

@@ -171,6 +171,15 @@ CREATE TABLE IF NOT EXISTS bridge_pending (
     status TEXT DEFAULT 'pending',
     result TEXT
 );
+CREATE TABLE IF NOT EXISTS connector_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL,
+    type TEXT,
+    name TEXT,
+    title TEXT,
+    ok INTEGER DEFAULT 0,
+    error TEXT
+);
 """
 
 # 老库加列：新库没有这些列时补上，已存在就忽略
@@ -626,6 +635,23 @@ class Store:
         for r in rows:
             r["reply"] = (r.get("reply") or "")[:240]
         return rows
+
+    # ---- 连接器推送日志：每次推送留痕，成功失败都可查 ----
+
+    def connector_push_log(self, ctype: str, name: str, title: str, ok: bool, error: str = "") -> dict:
+        self._run(
+            "INSERT INTO connector_log (ts, type, name, title, ok, error) VALUES (?,?,?,?,?,?)",
+            (time.time(), ctype or "", name or "", (title or "")[:200], 1 if ok else 0, (error or "")[:500]),
+            False,
+        )
+        return {"ok": True}
+
+    def connector_push_recent(self, limit: int = 50) -> list[dict]:
+        return self._run(
+            "SELECT id, ts, type, name, title, ok, error FROM connector_log "
+            "ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        )
 
     # ---- 神经桥：OpenClaw 提交的工作台写操作，先入待审队列，用户确认后才执行 ----
     def bridge_enqueue(self, action: str, payload: dict) -> int:

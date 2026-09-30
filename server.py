@@ -1010,6 +1010,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"rows": CFG.get("connectors") or []})
             return
 
+        if p == "/api/connectors/log":
+            self._json({"rows": STORE.connector_push_recent(50)})
+            return
+
         if p == "/api/habits":
             self._json({"rows": STORE.habits_list()})
             return
@@ -1599,7 +1603,22 @@ class Handler(BaseHTTPRequestHandler):
             if not c:
                 self._json({"ok": False, "error": "找不到这个连接器（去设置里添加一个）"})
                 return
-            self._json(integrations.connector_push(c, body.get("title", "工作台"), body.get("content", "")))
+            if not c.get("enabled", True):
+                self._json({"ok": False, "error": "这个连接器已被停用（去设置里开启）"})
+                return
+            r = integrations.connector_push(c, body.get("title", "工作台"), body.get("content", ""))
+            # 每次推送留痕：成功失败都可查（测试推送也记，方便排错）
+            try:
+                STORE.connector_push_log(
+                    (c.get("type") or ""), (c.get("name") or c.get("id") or ""),
+                    body.get("title", "工作台"), bool(r.get("ok")), r.get("error") or r.get("msg") or "")
+            except Exception:  # noqa: BLE001
+                pass
+            self._json(r)
+            return
+
+        if p == "/api/connectors/log":
+            self._json({"rows": STORE.connector_push_recent(50)})
             return
 
         if p == "/api/ai/chat":
