@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import calendar
 import io
 import json
 import os
@@ -290,6 +291,162 @@ def _mail_loop():
         time.sleep(20)
         try:
             _mail_tick()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------- H 域：日历 / 会议（71-78）----------------
+
+_ICS_FREQ = {"daily": "DAILY", "weekly": "WEEKLY", "monthly": "MONTHLY",
+             "yearly": "YEARLY", "weekdays": "WEEKLY"}
+
+
+def _ics_escape(s: str) -> str:
+    """ICS 文本要转义反斜杠/分号/逗号，换行用 \\n。"""
+    return ((s or "").replace("\\", "\\\\").replace(";", "\\;")
+            .replace(",", "\\,").replace("\r\n", "\\n").replace("\n", "\\n"))
+
+
+def _ics_dt(day: str, hm: str) -> str:
+    d = (day or "").replace("-", "")
+    t = (hm or "").replace(":", "")
+    if len(d) == 8 and len(t) == 4:
+        return f"{d}T{t}00"
+    return (d or "19700101") + "T000000"
+
+
+def _ics_cal(a: str, b: str) -> str:
+    """76 导出 ICS：日程 + 会议。重复日程只出原型并带 RRULE，交给日历软件自己展开。"""
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//OpenWorkbench//Calendar//CN",
+             "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "X-WR-CALNAME:OpenWorkbench 日程"]
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+    def vevent(uid, day, start, end, title, desc, loc, rule, link):
+        lines.append("BEGIN:VEVENT")
+        lines.append(f"UID:{uid}")
+        lines.append(f"DTSTAMP:{stamp}")
+        lines.append(f"SUMMARY:{_ics_escape(title)}")
+        lines.append(f"DTSTART:{_ics_dt(day, start)}")
+        if end:
+            lines.append(f"DTEND:{_ics_dt(day, end)}")
+        if desc:
+            lines.append(f"DESCRIPTION:{_ics_escape(desc)}")
+        if loc:
+            lines.append(f"LOCATION:{_ics_escape(loc)}")
+        if link:
+            lines.append(f"URL:{_ics_escape(link)}")
+        if rule:
+            lines.append("RRULE:" + rule)
+        lines.append("END:VEVENT")
+
+    seen = set()
+    for ev in STORE.events_range(a, b):
+        eid = ev.get("id")
+        if eid in seen:
+            continue
+        seen.add(eid)
+        rep = ev.get("repeat") or ""
+        rule = ""
+        if rep in _ICS_FREQ:
+            rule = "FREQ=" + _ICS_FREQ[rep]
+            if rep == "weekdays":
+                rule += ";BYDAY=MO,TU,WE,TH,FR"
+            until = (ev.get("repeat_until") or "").replace("-", "")
+            if until:
+                rule += f";UNTIL={until}T235959"
+        base = ev.get("base_day") or ev.get("day")
+        vevent(f"wb-ev-{eid}@openworkbench", base, ev.get("start"), ev.get("end"),
+               ev.get("title"), ev.get("note"), "", rule, "")
+    try:
+        mts = STORE._run("SELECT * FROM meetings WHERE day>=? AND day<=? ORDER BY day",
+                         (a, b))
+    except Exception:  # noqa: BLE001
+        mts = []
+    for mt in mts:
+        desc = "\n".join(x for x in [
+            ("参会：" + mt["attendees"]) if mt.get("attendees") else "",
+            mt.get("note") or "",
+        ] if x)
+        vevent(f"wb-mt-{mt.get('id')}@openworkbench", mt.get("day"), mt.get("start"),
+               mt.get("end"), mt.get("title"), desc, mt.get("location") or "", "",
+               mt.get("link") or "")
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _cal_minutes_prompt(row: dict) -> str:
+    """78 会议纪要：把会议信息拼成给 OpenClaw 的写作任务。"""
+    span = (row.get("start") or "")
+    if row.get("end"):
+        span = (span + "–" + str(row["end"])) if span else str(row["end"])
+    lines = ["把下面这场会议整理成一份会议纪要，用 Markdown 输出。", "",
+             f"- 主题：{row.get('title') or ''}",
+             f"- 日期：{row.get('day') or ''}",
+             f"- 时间：{span}"]
+    if row.get("location"):
+        lines.append(f"- 地点：{row['location']}")
+    if row.get("attendees"):
+        lines.append(f"- 参会：{row['attendees']}")
+    if row.get("link"):
+        lines.append(f"- 入会链接：{row['link']}")
+    note = (row.get("note") or "").strip()
+    if note:
+        lines += ["", "已有的记录 / 备注：", note]
+    lines += ["", "结构要求：## 结论与决定 / ## 讨论要点 / ## 待办事项（Markdown 表格：事项 | 负责人 | 截止）"
+              "/ ## 风险与遗留问题。信息不够的地方写「待补充」，不要编造人名或数字。"]
+    return "\n".join(lines)
+
+
+_REM_PUSH_LAST = {"ts": 0.0, "n": 0, "conn": 0}
+
+
+def _enabled_connectors() -> list[dict]:
+    return [c for c in (CFG.get("connectors") or [])
+            if c.get("enabled", True) and (c.get("token") or c.get("url"))]
+
+
+def _rem_push_once() -> int:
+    """75 第二通道：到点的提醒除了桌面通知，再往连接器推一份。
+
+    同一条提醒只推一次。没配连接器也照样标记已处理 ——
+    否则哪天配上一个连接器，会把积压的老提醒一次性全轰出来。
+    """
+    try:
+        due = STORE.rem_due_unpushed(time.time())
+    except Exception:  # noqa: BLE001
+        return 0
+    if not due:
+        return 0
+    conns = _enabled_connectors()
+    for r in due:
+        title = "工作台提醒"
+        content = r.get("text") or "时间到了"
+        for c in conns:
+            try:
+                res = integrations.connector_push(c, title, content)
+                STORE.connector_push_log((c.get("type") or ""),
+                                         (c.get("name") or c.get("id") or ""),
+                                         title, bool(res.get("ok")),
+                                         res.get("error") or res.get("msg") or "")
+            except Exception as e:  # noqa: BLE001
+                try:
+                    STORE.connector_push_log((c.get("type") or ""), (c.get("name") or ""),
+                                             title, False, f"{type(e).__name__}: {e}")
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            STORE.rem_mark_pushed(r["id"])
+        except Exception:  # noqa: BLE001
+            pass
+    _REM_PUSH_LAST.update(ts=time.time(), n=len(due), conn=len(conns))
+    return len(due)
+
+
+def _rem_push_loop():
+    while True:
+        time.sleep(30)
+        try:
+            _rem_push_once()
         except Exception:  # noqa: BLE001
             pass
 
@@ -813,6 +970,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _text(self, body: str, ctype: str = "text/plain; charset=utf-8",
+              filename: str = ""):
+        """非 JSON 的裸文本响应（ICS 导出这类要落成文件用）。"""
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header(
+                "Content-Disposition",
+                "attachment; filename*=UTF-8''" + quote(filename, safe=""))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         if not n:
@@ -1333,6 +1505,38 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"rows": STORE.events_range(a, b), "tasks": STORE.tasks_due(a, b)})
             return
 
+        if p == "/api/events/stats":
+            # 74 时长统计：给周/月两种窗口各算一份
+            q = parse_qs(u.query)
+            from_, to_ = q.get("from", [""])[0], q.get("to", [""])[0]
+            period = q.get("period", [""])[0]
+            if period or not from_:
+                today = DAY()
+                t = datetime.strptime(today, "%Y-%m-%d")
+                if period == "month":
+                    a = t.strftime("%Y-%m-01")
+                    b = t.strftime("%Y-%m-") + str(
+                        calendar.monthrange(t.year, t.month)[1])
+                else:                                  # 默认本周（周一起）
+                    a = (t - timedelta(days=t.weekday())).strftime("%Y-%m-%d")
+                    b = (t - timedelta(days=t.weekday()) + timedelta(days=6)).strftime("%Y-%m-%d")
+            else:
+                a, b = from_, to_
+            self._json(STORE.events_stats(a, b))
+            return
+
+        if p == "/api/events/ics":
+            q = parse_qs(u.query)
+            a = q.get("from", [""])[0]
+            b = q.get("to", [""])[0]
+            if not a or not b:
+                t = datetime.strptime(DAY(), "%Y-%m-%d")
+                a = (t - timedelta(days=90)).strftime("%Y-%m-%d")
+                b = (t + timedelta(days=180)).strftime("%Y-%m-%d")
+            self._text(_ics_cal(a, b), "text/calendar; charset=utf-8",
+                       "openworkbench.ics")
+            return
+
         if p == "/api/today/pending":
             self._json({"rows": STORE.today_pending(parse_qs(u.query).get("day", [""])[0] or DAY())})
             return
@@ -1381,6 +1585,17 @@ class Handler(BaseHTTPRequestHandler):
             month = parse_qs(u.query).get("month", [""])[0]
             self._json({"rows": STORE.meeting_list(month) if month else STORE._run(
                 "SELECT * FROM meetings ORDER BY day, start LIMIT 200")})
+            return
+
+        if p == "/api/meetings/minutes":
+            # 78 会议纪要：先把会议信息拼成给 OpenClaw 的写作任务返回给前端
+            mid = int(parse_qs(u.query).get("id", ["0"])[0] or 0)
+            rows = STORE._run("SELECT * FROM meetings WHERE id=?", (mid,))
+            if not rows:
+                self._json({"ok": False, "error": "没这场会议"})
+                return
+            row = rows[0]
+            self._json({"ok": True, "row": row, "prompt": _cal_minutes_prompt(row)})
             return
 
         if p == "/api/file-tags":
@@ -2002,10 +2217,26 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == "/api/events/save":
+            # 73 重复规则 / 77 颜色分类 / 75 提前提醒，一并交给 store
             self._json(STORE.event_save(
                 body.get("id") or None, body.get("day", ""), body.get("start", ""),
                 body.get("end", ""), body.get("title", "").strip(), body.get("note", ""),
                 body.get("source", "manual"),
+                body.get("repeat", "") or "", body.get("repeat_until", "") or "",
+                body.get("color", "") or "", body.get("remind_before", 0) or 0,
+            ))
+            return
+
+        if p == "/api/events/exdate":
+            # 73 删重复日程里的某一次
+            self._json(STORE.event_exdate(int(body.get("id", 0)), body.get("day", "")))
+            return
+
+        if p == "/api/events/move":
+            # 72 拖拽改时间（重复日程拖某次会自动拆成独立一条）
+            self._json(STORE.event_move(
+                int(body.get("id", 0)), body.get("occ", ""), body.get("day", ""),
+                body.get("start", ""), body.get("end", ""),
             ))
             return
 

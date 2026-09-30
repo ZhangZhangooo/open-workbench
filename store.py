@@ -7,6 +7,7 @@ import json
 import sqlite3
 import threading
 import time
+import calendar
 import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "app.db")
@@ -296,6 +297,15 @@ ALTERS = [
     "ALTER TABLE openclaw_runs ADD COLUMN agent TEXT DEFAULT ''",
     "ALTER TABLE openclaw_runs ADD COLUMN dur REAL DEFAULT 0",
     "ALTER TABLE openclaw_runs ADD COLUMN qid INTEGER DEFAULT 0",
+    # H 域：日历 / 会议进阶（71-78）
+    "ALTER TABLE events ADD COLUMN repeat TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN repeat_until TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN exdate TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN color TEXT DEFAULT ''",
+    "ALTER TABLE events ADD COLUMN remind_before INTEGER DEFAULT 0",
+    "ALTER TABLE events ADD COLUMN reminder_id INTEGER DEFAULT 0",
+    # 75 推送通道：同一条提醒只推一次连接器
+    "ALTER TABLE reminders ADD COLUMN pushed INTEGER DEFAULT 0",
 ]
 
 PROMPT_SCHEMA = """
@@ -331,6 +341,70 @@ def _today() -> str:
 def _tomorrow() -> str:
     import datetime as _dt
     return (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+
+
+# ---- 73 重复日程：规则展开 ----
+# 库里只留一条原型（day + repeat），取某个窗口时现算，避免「改规则要批量改数据」。
+
+REPEATS = ("daily", "weekdays", "weekly", "monthly", "yearly")
+
+
+def _d(s: str):
+    try:
+        y, m, dd = (int(x) for x in (s or "").split("-"))
+        return datetime.date(y, m, dd)
+    except (ValueError, TypeError):
+        return None
+
+
+def _add_months(base: datetime.date, n: int) -> datetime.date:
+    total = base.year * 12 + (base.month - 1) + n
+    y, m = divmod(total, 12)
+    m += 1
+    return datetime.date(y, m, min(base.day, calendar.monthrange(y, m)[1]))
+
+
+def expand_event(ev: dict, a: str, b: str) -> list[str]:
+    """一个日程在 [a,b] 里的所有发生日（含重复规则、跳过 exdate）。"""
+    base = _d(ev.get("day"))
+    lo, hi = _d(a), _d(b)
+    if not base or not lo or not hi:
+        return []
+    rep = (ev.get("repeat") or "").strip()
+    ex = {x.strip() for x in (ev.get("exdate") or "").split(",") if x.strip()}
+    if not rep:
+        return [base.isoformat()] if lo <= base <= hi else []
+    until = _d(ev.get("repeat_until"))
+    if until and until < hi:
+        hi = until
+    if hi < max(lo, base):
+        return []
+    out: list[str] = []
+    i = 0
+    cur = base
+    while cur and cur <= hi and i < 2000:
+        if cur >= lo and cur.isoformat() not in ex:
+            out.append(cur.isoformat())
+        i += 1
+        if rep == "daily":
+            cur = base + datetime.timedelta(days=i)
+        elif rep == "weekdays":                       # 周一到周五
+            cur = base + datetime.timedelta(days=i)
+            while cur.weekday() >= 5:
+                i += 1
+                cur = base + datetime.timedelta(days=i)
+        elif rep == "weekly":
+            cur = base + datetime.timedelta(days=7 * i)
+        elif rep == "monthly":
+            cur = _add_months(base, i)
+        elif rep == "yearly":
+            try:
+                cur = base.replace(year=base.year + i)
+            except ValueError:                        # 2/29 落在平年 → 取 2/28
+                cur = base.replace(year=base.year + i, day=28)
+        else:
+            break
+    return out
 
 
 class Store:
@@ -807,38 +881,166 @@ class Store:
     # ---- 日程 ----
 
     def events_list(self, month: str) -> list[dict]:
-        """按月份取日程，month 形如 2026-09。"""
-        return self._run(
-            "SELECT * FROM events WHERE day LIKE ? ORDER BY day, start, id",
-            (month + "%",),
-        )
+        """按月份取日程，month 形如 2026-09。重复日程会展开成多条。"""
+        return self.events_range(month + "-01", month + "-31")
 
     def events_range(self, a: str, b: str) -> list[dict]:
-        return self._run(
-            "SELECT * FROM events WHERE day>=? AND day<=? ORDER BY day, start, id",
-            (a, b),
-        )
+        """取 [a,b] 内的日程。
+
+        73 重复日程：库里只存一条原型，这里按规则把 [a,b] 内的每一次都摊出来，
+        非首次的那几次带 virtual=1，前端据此提示「删这一次还是删全部」。
+        """
+        plain = self._run(
+            "SELECT * FROM events WHERE COALESCE(repeat,'')='' AND day>=? AND day<=? "
+            "ORDER BY day, start, id", (a, b))
+        rep = self._run(
+            "SELECT * FROM events WHERE COALESCE(repeat,'')<>'' AND day<=? "
+            "AND (COALESCE(repeat_until,'')='' OR repeat_until>=?) "
+            "ORDER BY day, start, id", (b, a))
+        out = [{**ev, "occ": ev.get("day"), "base_day": ev.get("day"), "virtual": 0}
+               for ev in plain]
+        for ev in rep:
+            for ds in expand_event(ev, a, b):
+                out.append({**ev, "occ": ds, "day": ds, "base_day": ev.get("day"),
+                            "virtual": 1 if ds != ev.get("day") else 0})
+        out.sort(key=lambda r: (r.get("day") or "", r.get("start") or "", r.get("id") or 0))
+        return out
 
     def event_save(self, id_: int | None, day: str, start: str, end: str,
-                   title: str, note: str, source: str = "manual") -> dict:
+                   title: str, note: str, source: str = "manual",
+                   repeat: str = "", repeat_until: str = "", color: str = "",
+                   remind_before: int = 0) -> dict:
         if not day or not title:
             return {"ok": False, "error": "日期和标题都要填"}
+        rep = (repeat or "").strip()
+        if rep not in REPEATS:
+            rep = ""
+        try:
+            rb = int(remind_before or 0)
+        except (TypeError, ValueError):
+            rb = 0
+        # 75 提醒双通道：日程也挂一条提醒（桌面通知由前端轮询 /api/reminders 出）
+        old_rem = 0
+        if id_:
+            rows = self._run("SELECT reminder_id FROM events WHERE id=?", (id_,))
+            old_rem = rows[0]["reminder_id"] if rows else 0
+        if old_rem:
+            self._run("DELETE FROM reminders WHERE id=?", (old_rem,), False)
+        reminder_id = 0
+        if rb > 0 and start:
+            at = self._daystart_epoch(day, start) - rb * 60
+            if at > time.time():
+                reminder_id = self.rem_add(at, "日程提醒：" + title).get("id", 0)
+        col = (color or "").strip()
+        until = (repeat_until or "").strip()
         if id_:
             self._run(
-                "UPDATE events SET day=?, start=?, end=?, title=?, note=?, source=? WHERE id=?",
-                (day, start, end, title, note, source, id_),
-                False,
-            )
+                "UPDATE events SET day=?,start=?,end=?,title=?,note=?,source=?,repeat=?,"
+                "repeat_until=?,color=?,remind_before=?,reminder_id=? WHERE id=?",
+                (day, start, end, title, note, source, rep, until, col, rb,
+                 reminder_id, id_), False)
             return {"ok": True, "id": id_}
         cur = self.conn.execute(
-            "INSERT INTO events (day, start, end, title, note, source, created) VALUES (?,?,?,?,?,?,?)",
-            (day, start, end, title, note, source, time.time()),
-        )
+            "INSERT INTO events (day,start,end,title,note,source,repeat,repeat_until,color,"
+            "remind_before,reminder_id,created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (day, start, end, title, note, source, rep, until, col, rb, reminder_id,
+             time.time()))
         self.conn.commit()
         return {"ok": True, "id": cur.lastrowid}
 
     def event_del(self, id_: int) -> dict:
-        self._run("DELETE FROM events WHERE id=?", (id_,), False)
+        rows = self._run("SELECT reminder_id FROM events WHERE id=?", (int(id_),))
+        rem = rows[0]["reminder_id"] if rows else 0
+        if rem:
+            self._run("DELETE FROM reminders WHERE id=?", (rem,), False)
+        self._run("DELETE FROM events WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    def event_exdate(self, id_: int, day: str) -> dict:
+        """73 删掉重复日程里的某一次：记进 exdate，不动整条；删首次等于删整条。"""
+        rows = self._run("SELECT day, exdate, COALESCE(repeat,'') AS repeat "
+                         "FROM events WHERE id=?", (int(id_),))
+        if not rows:
+            return {"ok": False, "error": "没这条日程"}
+        r = rows[0]
+        base = r.get("day") or ""
+        if not r.get("repeat") or day == base:
+            return self.event_del(int(id_))
+        ex = [x for x in (r.get("exdate") or "").split(",") if x]
+        if day not in ex:
+            ex.append(day)
+        self._run("UPDATE events SET exdate=? WHERE id=?", (",".join(ex), int(id_)), False)
+        return {"ok": True, "exdate": ",".join(ex)}
+
+    def event_move(self, id_: int, occ: str, day: str, start: str = "",
+                   end: str = "") -> dict:
+        """72 拖拽改时间。重复日程拖某一次：把这一次排掉，另起一条独立日程。"""
+        rows = self._run("SELECT * FROM events WHERE id=?", (int(id_),))
+        if not rows:
+            return {"ok": False, "error": "没这条日程"}
+        ev = rows[0]
+        base = ev.get("day") or ""
+        occ = occ or base
+        if not ev.get("repeat") or occ == base:
+            self._run("UPDATE events SET day=?, start=?, end=? WHERE id=?",
+                      (day, start or ev.get("start") or "", end or ev.get("end") or "",
+                       int(id_)), False)
+            return {"ok": True, "id": int(id_), "moved": "series"}
+        self.event_exdate(int(id_), occ)
+        new = self.event_save(None, day, start or ev.get("start") or "",
+                              end or ev.get("end") or "", ev.get("title") or "",
+                              ev.get("note") or "", ev.get("source") or "manual",
+                              "", "", ev.get("color") or "", 0)
+        return {"ok": True, "id": new.get("id"), "moved": "split", "from": occ}
+
+    def today_events_map(self, day: str) -> list[dict]:
+        """某天的日程 + 会议 + 到期任务，给今日页和纪要入口共用。"""
+        out = self.events_range(day, day)
+        for m in self._run("SELECT * FROM meetings WHERE day=? ORDER BY start, id", (day,)):
+            out.append({**m, "occ": day, "base_day": day, "_m": 1, "virtual": 0})
+        for t in self.tasks_due(day, day):
+            out.append({**t, "occ": t.get("due"), "day": t.get("due"), "_t": 1})
+        return out
+
+    def events_stats(self, a: str, b: str) -> dict:
+        """74 时长统计：日程 + 会议各占多少，按天拆开。"""
+        def minutes(s: str, e: str) -> int:
+            try:
+                sh, sm = (int(x) for x in (s or "").split(":"))
+                eh, em = (int(x) for x in (e or "").split(":"))
+            except (ValueError, TypeError):
+                return 0
+            m = (eh * 60 + em) - (sh * 60 + sm)
+            return m if m > 0 else 0
+
+        evs = self.events_range(a, b)
+        mts = self._run("SELECT * FROM meetings WHERE day>=? AND day<=? ORDER BY day", (a, b))
+        by_day: dict[str, int] = {}
+        ev_min = 0
+        for ev in evs:
+            m = minutes(ev.get("start"), ev.get("end"))
+            ev_min += m
+            k = ev.get("day") or ""
+            by_day[k] = by_day.get(k, 0) + m
+        mt_min = 0
+        for mt in mts:
+            m = minutes(mt.get("start"), mt.get("end"))
+            mt_min += m
+            k = mt.get("day") or ""
+            by_day[k] = by_day.get(k, 0) + m
+        return {"ok": True, "from": a, "to": b,
+                "event_min": ev_min, "meet_min": mt_min, "total_min": ev_min + mt_min,
+                "event_n": len(evs), "meet_n": len(mts),
+                "days": [{"day": k, "min": v} for k, v in sorted(by_day.items()) if k]}
+
+    def rem_due_unpushed(self, now: float) -> list[dict]:
+        """75 还没推过连接器的到期提醒。"""
+        return self._run(
+            "SELECT * FROM reminders WHERE COALESCE(pushed,0)=0 AND COALESCE(done,0)=0 "
+            "AND at<=? ORDER BY at", (now,))
+
+    def rem_mark_pushed(self, rid: int) -> dict:
+        self._run("UPDATE reminders SET pushed=1 WHERE id=?", (int(rid),), False)
         return {"ok": True}
 
     def event_done(self, id_: int, done: int) -> dict:
