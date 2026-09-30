@@ -1686,6 +1686,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"rows": STORE.projects_board()})
             return
 
+        if p == "/api/projects/templates":
+            # 84 可选的起手模板
+            self._json({"rows": store.project_templates(),
+                        "default_stale_days": STORE.stale_days()})
+            return
+
+        if p == "/api/projects/timeline":
+            # 85 甘特简版
+            q = parse_qs(u.query)
+            self._json(STORE.projects_timeline(int(q.get("project_id", ["0"])[0] or 0)))
+            return
+
+        if p == "/api/milestones":
+            q = parse_qs(u.query)
+            self._json({"rows": STORE.milestone_list(int(q.get("project_id", ["0"])[0] or 0))})
+            return
+
+        if p == "/api/tasks/all":
+            # 83 跨项目任务一屏看
+            q = parse_qs(u.query)
+            self._json({"rows": STORE.tasks_all(
+                q.get("state", [""])[0], int(q.get("project_id", ["0"])[0] or 0))})
+            return
+
         if p == "/api/tasks":
             self._json({
                 "rows": STORE.tasks_list(int(parse_qs(u.query).get("project_id", ["0"])[0])),
@@ -2574,11 +2598,41 @@ class Handler(BaseHTTPRequestHandler):
             self._json(STORE.project_save(
                 body.get("id") or None, body.get("name", ""),
                 body.get("status", ""), body.get("next_step", ""),
+                body.get("deadline", "") or "", body.get("color", "") or "",
+                body.get("template", "") or "",
             ))
             return
 
         if p == "/api/projects/del":
             self._json(STORE.project_del(int(body.get("id", 0))))
+            return
+
+        if p == "/api/projects/archive":
+            self._json(STORE.project_archive(int(body.get("id", 0)),
+                                             int(body.get("on", 1) or 0)))
+            return
+
+        if p == "/api/projects/template/apply":
+            self._json(STORE.apply_template(int(body.get("project_id", 0)),
+                                            body.get("template", "")))
+            return
+
+        if p == "/api/milestones/save":
+            self._json(STORE.milestone_save(
+                body.get("id") or None, int(body.get("project_id", 0) or 0),
+                body.get("title", ""), body.get("day", "") or "",
+                body.get("pct", 0) or 0,
+            ))
+            return
+
+        if p == "/api/milestones/done":
+            self._json(STORE.milestone_done(int(body.get("id", 0)),
+                                            int(body.get("done", 1) or 0),
+                                            int(body.get("pct", -1) or -1)))
+            return
+
+        if p == "/api/milestones/del":
+            self._json(STORE.milestone_del(int(body.get("id", 0))))
             return
 
         if p == "/api/tasks/save":

@@ -106,6 +106,16 @@ CREATE TABLE IF NOT EXISTS plog (
     text TEXT,
     created REAL
 );
+CREATE TABLE IF NOT EXISTS milestones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER DEFAULT 0,
+    title TEXT,
+    day TEXT DEFAULT '',
+    pct INTEGER DEFAULT 0,
+    done INTEGER DEFAULT 0,
+    sort INTEGER DEFAULT 0,
+    created REAL
+);
 CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT
@@ -306,6 +316,12 @@ ALTERS = [
     "ALTER TABLE events ADD COLUMN reminder_id INTEGER DEFAULT 0",
     # 75 推送通道：同一条提醒只推一次连接器
     "ALTER TABLE reminders ADD COLUMN pushed INTEGER DEFAULT 0",
+    # I 域：项目进阶（79-86）
+    "ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0",
+    "ALTER TABLE projects ADD COLUMN deadline TEXT DEFAULT ''",
+    "ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''",
+    "ALTER TABLE projects ADD COLUMN kind TEXT DEFAULT ''",
+    "ALTER TABLE projects ADD COLUMN created REAL",
 ]
 
 PROMPT_SCHEMA = """
@@ -362,6 +378,33 @@ def _add_months(base: datetime.date, n: int) -> datetime.date:
     y, m = divmod(total, 12)
     m += 1
     return datetime.date(y, m, min(base.day, calendar.monthrange(y, m)[1]))
+
+
+# ---- 84 项目模板：新项目自带一份起手清单 ----
+# 不做数据库表，模板是「出厂设定」，改起来简单，也不会被误删。
+
+PROJECT_TEMPLATES = [
+    {"key": "blank", "name": "空白项目", "desc": "什么都不带，自己搭",
+     "tasks": [], "milestones": []},
+    {"key": "code", "name": "写代码", "desc": "需求 → 骨架 → 跑通 → 打磨 → 发布",
+     "tasks": ["想清楚要解决什么问题", "搭出能跑的最小骨架", "打通主流程", "处理边界与报错", "写清怎么用"],
+     "milestones": [{"title": "最小可用", "pct": 40}, {"title": "功能齐全", "pct": 80},
+                    {"title": "能给别人用", "pct": 100}]},
+    {"key": "study", "name": "啃一本书 / 一门课", "desc": "通读 → 笔记 → 输出",
+     "tasks": ["先翻一遍目录，画个地图", "逐章精读并做笔记", "整理成一篇自己的话", "回头补漏"],
+     "milestones": [{"title": "读完一半", "pct": 50}, {"title": "笔记成篇", "pct": 85},
+                    {"title": "能讲给别人听", "pct": 100}]},
+    {"key": "writing", "name": "写东西", "desc": "选题 → 资料 → 初稿 → 改 → 定稿",
+     "tasks": ["定选题和角度", "收集材料", "写初稿（先写完再改）", "改结构", "改字句"],
+     "milestones": [{"title": "初稿完成", "pct": 60}, {"title": "定稿", "pct": 100}]},
+    {"key": "life", "name": "生活小事", "desc": "查 → 定 → 办 → 收尾",
+     "tasks": ["先查清楚要什么", "比价 / 定方案", "下单 / 动手", "收货检查"],
+     "milestones": [{"title": "方案定了", "pct": 50}, {"title": "办完", "pct": 100}]},
+]
+
+
+def project_templates() -> list[dict]:
+    return PROJECT_TEMPLATES
 
 
 def expand_event(ev: dict, a: str, b: str) -> list[str]:
@@ -1608,34 +1651,92 @@ class Store:
 
     # ---- 项目 ----
 
-    def projects_list(self) -> list[dict]:
-        return self._run("SELECT * FROM projects ORDER BY id")
+    def projects_list(self, archived: int = 0) -> list[dict]:
+        """archived: -1 全部 / 0 未归档 / 1 只看归档。"""
+        if archived < 0:
+            return self._run("SELECT * FROM projects ORDER BY archived, id")
+        return self._run("SELECT * FROM projects WHERE COALESCE(archived,0)=? ORDER BY id",
+                         (int(archived),))
 
-    def project_save(self, id_: int | None, name: str, status: str, next_step: str) -> dict:
+    def project_save(self, id_: int | None, name: str, status: str, next_step: str,
+                     deadline: str = "", color: str = "", template: str = "") -> dict:
+        """84 新建时可带模板：一并把默认任务和里程碑种下去。"""
         now = time.time()
         if id_:
             self._run(
-                "UPDATE projects SET name=?, status=?, next_step=?, updated=? WHERE id=?",
-                (name, status, next_step, now, id_),
+                "UPDATE projects SET name=?, status=?, next_step=?, deadline=?, color=?, "
+                "updated=? WHERE id=?",
+                (name, status, next_step, deadline or "", color or "", now, id_),
                 False,
             )
+            self.plog_add(id_, "改了项目信息（状态：%s）" % (status or "未设"), "auto")
             return {"ok": True, "id": id_}
         cur = self.conn.execute(
-            "INSERT INTO projects (name, status, next_step, updated) VALUES (?,?,?,?)",
-            (name, status, next_step, now),
+            "INSERT INTO projects (name, status, next_step, deadline, color, kind, archived, "
+            "updated, created) VALUES (?,?,?,?,?,?,0,?,?)",
+            (name, status, next_step, deadline or "", color or "", template or "", now, now),
         )
         self.conn.commit()
-        return {"ok": True, "id": cur.lastrowid}
+        pid = cur.lastrowid
+        self.plog_add(pid, "建了这个项目", "auto")
+        if template:
+            self.apply_template(pid, template)
+        return {"ok": True, "id": pid, "template": template or ""}
+
+    def apply_template(self, pid: int, key: str) -> dict:
+        """84 给项目种模板：任务进看板，里程碑进里程碑表。"""
+        tpl = next((t for t in PROJECT_TEMPLATES if t["key"] == key), None)
+        if not tpl or key == "blank":
+            return {"ok": False, "error": "没有这个模板"}
+        for title in tpl["tasks"]:
+            self.task_save(None, pid, title, "待办", "", quiet=True)
+        for i, ms in enumerate(tpl["milestones"]):
+            self.milestone_save(None, pid, ms["title"], "", int(ms.get("pct") or 0), i,
+                                quiet=True)
+        self.plog_add(pid, "套用了模板「%s」：%d 个任务、%d 个里程碑"
+                      % (tpl["name"], len(tpl["tasks"]), len(tpl["milestones"])), "auto")
+        return {"ok": True, "n_task": len(tpl["tasks"]), "n_ms": len(tpl["milestones"])}
+
+    def project_archive(self, id_: int, on: int = 1) -> dict:
+        """82 归档：做完的收起来，不删数据。"""
+        self._run("UPDATE projects SET archived=?, updated=? WHERE id=?",
+                  (1 if on else 0, time.time(), int(id_)), False)
+        self.plog_add(int(id_), "归档了" if on else "从归档里放回来了", "auto")
+        return {"ok": True, "archived": 1 if on else 0}
 
     def project_del(self, id_: int) -> dict:
         self._run("DELETE FROM projects WHERE id=?", (id_,), False)
         self._run("DELETE FROM tasks WHERE project_id=?", (id_,), False)
         self._run("DELETE FROM plog WHERE project_id=?", (id_,), False)
+        self._run("DELETE FROM milestones WHERE project_id=?", (id_,), False)
         return {"ok": True}
 
-    def projects_board(self) -> list[dict]:
-        """项目卡片 + 任务进度 + 累计番茄分钟，一次给全。"""
-        rows = self._run("SELECT * FROM projects ORDER BY id")
+    def _last_active(self, pid: int) -> float:
+        """80 停滞预警：项目上最后一次有动静是什么时候。"""
+        row = self.conn.execute("SELECT updated, created FROM projects WHERE id=?", (pid,)).fetchone()
+        cands = [row["updated"] if row else 0, row["created"] if row else 0]
+        for sql in ("SELECT MAX(created) m FROM plog WHERE project_id=?",
+                    "SELECT MAX(created) m FROM tasks WHERE project_id=?",
+                    "SELECT MAX(done_at) m FROM tasks WHERE project_id=?",
+                    "SELECT MAX(created) m FROM milestones WHERE project_id=?",
+                    "SELECT MAX(ended) m FROM pomodoro WHERE project_id=?"):
+            try:
+                v = self.conn.execute(sql, (pid,)).fetchone()[0]
+                if v:
+                    cands.append(v)
+            except sqlite3.OperationalError:
+                pass
+        return float(max(cands) or 0)
+
+    def projects_board(self, stale_days: int | None = None) -> list[dict]:
+        """项目卡片 + 任务进度 + 番茄分钟 + 里程碑完成度 + 停滞天数，一次给全。
+
+        stale_days 不传就读配置（kv.projectStaleDays，默认 7 天）。
+        """
+        if stale_days is None:
+            stale_days = self.stale_days()
+        rows = self._run("SELECT * FROM projects ORDER BY archived, id")
+        now = time.time()
         for p in rows:
             pid = p["id"]
             p["n_task"] = self.conn.execute(
@@ -1649,7 +1750,139 @@ class Store:
             p["mins"] = round(self.conn.execute(
                 "SELECT COALESCE(SUM(minutes),0) FROM pomodoro WHERE project_id=?",
                 (pid,)).fetchone()[0] or 0)
+            # 79 里程碑完成度
+            ms = self._run("SELECT pct, done FROM milestones WHERE project_id=? ORDER BY sort, id",
+                           (pid,))
+            p["n_ms"] = len(ms)
+            p["ms_done"] = sum(1 for m in ms if m.get("done"))
+            p["ms_pct"] = round(sum((100 if m.get("done") else (m.get("pct") or 0))
+                                    for m in ms) / len(ms)) if ms else 0
+            # 80 停滞预警
+            last = self._last_active(pid)
+            p["last_active"] = last
+            days = int((now - last) // 86400) if last else 0
+            p["idle_days"] = days
+            p["stale"] = 1 if (days >= stale_days and p.get("status") != "已完成"
+                               and not p.get("archived")) else 0
         return rows
+
+    def stale_days(self) -> int:
+        rows = self._run("SELECT v FROM kv WHERE k='projectStaleDays'")
+        try:
+            return max(1, int((rows[0]["v"] if rows else "") or 7))
+        except (ValueError, TypeError):
+            return 7
+
+    # ---- 79 里程碑 ----
+
+    def milestone_list(self, project_id: int = 0) -> list[dict]:
+        if project_id:
+            return self._run("SELECT * FROM milestones WHERE project_id=? ORDER BY sort, id",
+                             (project_id,))
+        return self._run("SELECT * FROM milestones ORDER BY project_id, sort, id")
+
+    def milestone_save(self, id_: int | None, project_id: int, title: str, day: str = "",
+                       pct: int = 0, sort: int = -1, quiet: bool = False) -> dict:
+        if not (title or "").strip():
+            return {"ok": False, "error": "里程碑要有名字"}
+        try:
+            pct = max(0, min(100, int(pct or 0)))
+        except (ValueError, TypeError):
+            pct = 0
+        if id_:
+            self._run("UPDATE milestones SET title=?, day=?, pct=? WHERE id=?",
+                      (title.strip(), day or "", pct, int(id_)), False)
+            return {"ok": True, "id": id_}
+        if sort < 0:
+            sort = self.conn.execute(
+                "SELECT COALESCE(MAX(sort),-1)+1 FROM milestones WHERE project_id=?",
+                (int(project_id or 0),)).fetchone()[0]
+        cur = self.conn.execute(
+            "INSERT INTO milestones (project_id, title, day, pct, done, sort, created) "
+            "VALUES (?,?,?,?,0,?,?)",
+            (int(project_id or 0), title.strip(), day or "", pct, sort, time.time()),
+        )
+        self.conn.commit()
+        if not quiet:
+            self.plog_add(int(project_id or 0), "加了里程碑「%s」" % title.strip(), "auto")
+        return {"ok": True, "id": cur.lastrowid}
+
+    def milestone_done(self, id_: int, done: int = 1, pct: int = -1) -> dict:
+        rows = self._run("SELECT * FROM milestones WHERE id=?", (int(id_),))
+        if not rows:
+            return {"ok": False, "error": "没这个里程碑"}
+        d = 1 if done else 0
+        newpct = 100 if d else (0 if pct < 0 else max(0, min(100, int(pct))))
+        self._run("UPDATE milestones SET done=?, pct=? WHERE id=?", (d, newpct, int(id_)), False)
+        if d:
+            self.plog_add(int(rows[0].get("project_id") or 0),
+                          "完成了里程碑「%s」" % (rows[0].get("title") or ""), "auto")
+        return {"ok": True, "done": d, "pct": newpct}
+
+    def milestone_del(self, id_: int) -> dict:
+        self._run("DELETE FROM milestones WHERE id=?", (int(id_),), False)
+        return {"ok": True}
+
+    # ---- 83 跨项目任务 ----
+
+    def tasks_all(self, state: str = "", project_id: int = 0) -> list[dict]:
+        """所有项目的任务一屏看，带项目名。"""
+        sql = ("SELECT t.*, COALESCE(p.name,'(没挂项目)') AS project, "
+               "COALESCE(p.color,'') AS pcolor, COALESCE(p.archived,0) AS p_archived "
+               "FROM tasks t LEFT JOIN projects p ON p.id=t.project_id WHERE 1=1")
+        args = []
+        if state:
+            sql += " AND t.state=?"
+            args.append(state)
+        if project_id:
+            sql += " AND t.project_id=?"
+            args.append(int(project_id))
+        sql += " ORDER BY CASE t.state WHEN '在做' THEN 0 WHEN '待办' THEN 1 ELSE 2 END, " \
+               "t.due='' , t.due, t.project_id, t.sort, t.id"
+        return self._run(sql, tuple(args))
+
+    # ---- 85 时间线（甘特简版）----
+
+    def projects_timeline(self, project_id: int = 0) -> dict:
+        """项目跨度 + 任务截止 + 里程碑日期，拼成几条能画成横条的区间。"""
+        projs = ([p for p in self._run("SELECT * FROM projects WHERE id=?", (project_id,))]
+                 if project_id else self._run("SELECT * FROM projects ORDER BY id"))
+        out = []
+        for p in projs:
+            pid = p["id"]
+            ts = [t for t in self._run("SELECT * FROM tasks WHERE project_id=?", (pid,))
+                  if t.get("due")]
+            ms = [m for m in self._run("SELECT * FROM milestones WHERE project_id=?", (pid,))
+                  if m.get("day")]
+            pts = [x for x in [p.get("created"), p.get("updated")] if x]
+            starts = [x for x in ([t["due"] for t in ts] + [m["day"] for m in ms]
+                                  + ([p["deadline"]] if p.get("deadline") else [])) if x]
+            # 起点：项目创建日；终点：最晚的截止/里程碑/最后活动
+            import datetime as _dt
+            c = p.get("created")
+            s = _dt.date.fromtimestamp(c).isoformat() if c else (
+                min(starts) if starts else "")
+            e = max(starts) if starts else (
+                _dt.date.fromtimestamp(max(pts)).isoformat() if pts else s)
+            if not s:
+                continue
+            out.append({
+                "id": pid, "name": p.get("name") or "", "color": p.get("color") or "",
+                "status": p.get("status") or "", "archived": p.get("archived") or 0,
+                "start": s, "end": e,
+                "tasks": sorted([{"title": t.get("title"), "due": t.get("due"),
+                                  "state": t.get("state")} for t in ts],
+                                key=lambda x: x["due"] or ""),
+                "milestones": sorted([{"title": m.get("title"), "day": m.get("day"),
+                                       "done": m.get("done")} for m in ms],
+                                     key=lambda x: x["day"] or ""),
+            })
+        return {"ok": True, "rows": out}
+
+    # ---- 86 动态日志 ----
+
+    def plog_auto(self, project_id: int, text: str) -> dict:
+        return self.plog_add(int(project_id or 0), text, "auto")
 
     # ---- 任务看板 ----
 
@@ -1660,12 +1893,14 @@ class Store:
         return self._run("SELECT * FROM tasks ORDER BY project_id, sort, id")
 
     def task_save(self, id_: int | None, project_id: int, title: str, state: str,
-                  due: str = "") -> dict:
+                  due: str = "", quiet: bool = False) -> dict:
         if not title:
             return {"ok": False, "error": "任务名不能为空"}
         if id_:
             self._run("UPDATE tasks SET project_id=?, title=?, state=?, due=? WHERE id=?",
                       (int(project_id or 0), title, state or "待办", due or "", id_), False)
+            if not quiet:
+                self.plog_auto(project_id, "改了任务「%s」" % title)
             return {"ok": True, "id": id_}
         cur = self.conn.execute(
             "INSERT INTO tasks (project_id, title, state, due, sort, created) "
@@ -1674,16 +1909,26 @@ class Store:
              int(project_id or 0), time.time()),
         )
         self.conn.commit()
+        if not quiet:
+            self.plog_auto(project_id, "加了任务「%s」" % title)
         return {"ok": True, "id": cur.lastrowid}
 
     def task_state(self, id_: int, state: str) -> dict:
         now = time.time() if state == "已完成" else None
+        rows = self._run("SELECT project_id, title FROM tasks WHERE id=?", (id_,))
         self._run("UPDATE tasks SET state=?, done_at=COALESCE(?, done_at) WHERE id=?",
                   (state, now, id_), False)
+        if rows:
+            self.plog_auto(rows[0].get("project_id") or 0,
+                           "任务「%s」→ %s" % (rows[0].get("title") or "", state))
         return {"ok": True}
 
     def task_due(self, id_: int, due: str) -> dict:
+        rows = self._run("SELECT project_id, title FROM tasks WHERE id=?", (id_,))
         self._run("UPDATE tasks SET due=? WHERE id=?", (due or "", id_), False)
+        if rows:
+            self.plog_auto(rows[0].get("project_id") or 0,
+                           "任务「%s」截止改为 %s" % (rows[0].get("title") or "", due or "不限"))
         return {"ok": True}
 
     def tasks_due(self, a: str, b: str) -> list[dict]:
@@ -1695,7 +1940,11 @@ class Store:
             "AND t.state<>'已完成' ORDER BY t.due, t.id", (a, b))
 
     def task_del(self, id_: int) -> dict:
-        self._run("DELETE FROM tasks WHERE id=?", (id_,), False)
+        rows = self._run("SELECT project_id, title FROM tasks WHERE id=?", (int(id_),))
+        self._run("DELETE FROM tasks WHERE id=?", (int(id_),), False)
+        if rows:
+            self.plog_auto(rows[0].get("project_id") or 0,
+                           "删了任务「%s」" % (rows[0].get("title") or ""))
         return {"ok": True}
 
     # ---- 番茄钟 ----

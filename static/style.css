@@ -1013,6 +1013,81 @@ main {
 .prow:hover { background: var(--hover); }
 .prow.on { background: var(--accent-soft); }
 
+/* 80 停滞预警：标灰 + 虚线，一眼看出好久没动 */
+.prow.stale { opacity: .55; }
+.prow.stale:hover { opacity: .8; }
+.prow.stale b { border-bottom: 1px dashed var(--warn); }
+
+/* 82 归档：更淡，还带点斜纹意思 */
+.prow.arch { opacity: .45; }
+
+/* 79 里程碑的勾选框（跟日程行同款） */
+.mrow .cb,
+.cb {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  cursor: pointer;
+  transition: background .15s var(--ease), border-color .15s var(--ease);
+}
+
+.cb.on,
+.mrow .cb.on { background: var(--accent); border-color: var(--accent); }
+
+/* 81 看板拖拽 */
+.trow.dragging { opacity: .45; }
+.col.drop-hint { outline: 2px dashed var(--accent); outline-offset: -2px; }
+
+/* 85 时间线（甘特简版） */
+.gantt-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 130px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gantt-name {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-track {
+  position: relative;
+  height: 14px;
+  background: var(--hover);
+  border-radius: 4px;
+}
+
+.gantt-bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 4px;
+  opacity: .8;
+}
+
+.gantt-ms {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 20px;
+  background: var(--ink-3);
+  border-radius: 2px;
+  transform: translateX(-1px);
+}
+
+.gantt-ms.done { background: var(--ok); }
+
+.gantt-note { font-size: 11.5px; color: var(--ink-3); text-align: right; }
+
+.ptab.active { background: var(--accent-soft); color: var(--accent); }
+
 .bar-mini {
   height: 4px;
   border-radius: 999px;
