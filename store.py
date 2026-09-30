@@ -171,6 +171,16 @@ CREATE TABLE IF NOT EXISTS bridge_pending (
     status TEXT DEFAULT 'pending',
     result TEXT
 );
+CREATE TABLE IF NOT EXISTS bridge_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL,
+    action TEXT,
+    payload TEXT,
+    summary TEXT,
+    decision TEXT,
+    actor TEXT,
+    result TEXT
+);
 CREATE TABLE IF NOT EXISTS connector_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL,
@@ -214,6 +224,11 @@ ALTERS = [
     "ALTER TABLE pomodoro ADD COLUMN today_id INTEGER DEFAULT 0",
     # D 域：AI 问一问
     "ALTER TABLE chats ADD COLUMN sys TEXT DEFAULT ''",
+    # E 域：OpenClaw 干活
+    "ALTER TABLE openclaw_runs ADD COLUMN fav INTEGER DEFAULT 0",
+    "ALTER TABLE openclaw_runs ADD COLUMN agent TEXT DEFAULT ''",
+    "ALTER TABLE openclaw_runs ADD COLUMN dur REAL DEFAULT 0",
+    "ALTER TABLE openclaw_runs ADD COLUMN qid INTEGER DEFAULT 0",
 ]
 
 PROMPT_SCHEMA = """
@@ -900,23 +915,117 @@ class Store:
 
     # ---- OpenClaw 运行记录（统一活动，区别于 claw 标签的 localStorage 历史）----
 
-    def openclaw_log(self, task: str, reply: str, ok: int = 1, mode: str = "run") -> dict:
+    def openclaw_log(self, task: str, reply: str, ok: int = 1, mode: str = "run",
+                     agent: str = "", dur: float = 0, qid: int = 0) -> dict:
         self._run(
-            "INSERT INTO openclaw_runs (ts, task, reply, ok, mode) VALUES (?,?,?,?,?)",
-            (time.time(), (task or "")[:2000], (reply or "")[:8000], int(ok), mode),
+            "INSERT INTO openclaw_runs (ts, task, reply, ok, mode, agent, dur, qid) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (time.time(), (task or "")[:2000], (reply or "")[:8000], int(ok), mode,
+             (agent or "")[:80], float(dur or 0), int(qid or 0)),
             False,
         )
         return {"ok": True}
 
     def openclaw_recent(self, limit: int = 30) -> list[dict]:
         rows = self._run(
-            "SELECT id, ts, task, reply, ok, mode FROM openclaw_runs "
+            "SELECT id, ts, task, reply, ok, mode, fav, agent, dur FROM openclaw_runs "
             "ORDER BY id DESC LIMIT ?",
             (int(limit),),
         )
         for r in rows:
             r["reply"] = (r.get("reply") or "")[:240]
         return rows
+
+    def openclaw_search(self, q: str, only: str = "all", limit: int = 50) -> list[dict]:
+        """按关键词翻历史任务：任务名和结果正文都搜。only=task/reply 可缩小范围。"""
+        q = (q or "").strip()
+        like = "%" + q + "%"
+        where = ""
+        args: list = []
+        if q:
+            if only == "task":
+                where = "WHERE task LIKE ?"
+                args.append(like)
+            elif only == "reply":
+                where = "WHERE reply LIKE ?"
+                args.append(like)
+            else:
+                where = "WHERE (task LIKE ? OR reply LIKE ?)"
+                args += [like, like]
+        args.append(int(limit))
+        rows = self._run(
+            "SELECT id, ts, task, reply, ok, mode, fav, agent, dur FROM openclaw_runs "
+            + where + " ORDER BY id DESC LIMIT ?",
+            tuple(args),
+        )
+        for r in rows:
+            r["reply"] = (r.get("reply") or "")[:240]
+        return rows
+
+    def openclaw_fav(self, id_: int, on: int | None = None) -> dict:
+        if on is None:
+            cur = self._run("SELECT fav FROM openclaw_runs WHERE id=?", (int(id_),))
+            if not cur:
+                return {"ok": False, "error": "没这条记录"}
+            on = 0 if cur[0].get("fav") else 1
+        self._run("UPDATE openclaw_runs SET fav=? WHERE id=?", (int(on), int(id_)), False)
+        return {"ok": True, "id": int(id_), "fav": bool(on)}
+
+    def openclaw_favs(self, limit: int = 60) -> list[dict]:
+        rows = self._run(
+            "SELECT id, ts, task, reply, ok, mode, fav, agent, dur FROM openclaw_runs "
+            "WHERE fav=1 ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        )
+        for r in rows:
+            r["reply"] = (r.get("reply") or "")[:240]
+        return rows
+
+    def openclaw_get(self, id_: int) -> dict:
+        rows = self._run("SELECT * FROM openclaw_runs WHERE id=?", (int(id_),))
+        return rows[0] if rows else {}
+
+    def openclaw_stats(self, days: int = 30) -> dict:
+        """成功率 / 平均 / P95 时长。时长优先用实际跑的秒数，旧记录按 0 跳过。"""
+        since = time.time() - int(days) * 86400
+        rows = self._run(
+            "SELECT ok, dur FROM openclaw_runs WHERE ts >= ?", (since,))
+        n = len(rows)
+        if not n:
+            return {"n": 0, "ok_n": 0, "fail_n": 0, "rate": 0,
+                    "avg": 0, "p95": 0, "days": int(days), "slowest": 0}
+        ok_n = sum(1 for r in rows if r.get("ok"))
+        durs = sorted(float(r.get("dur") or 0) for r in rows)
+        durs = [d for d in durs if d > 0]
+        avg = sum(durs) / len(durs) if durs else 0
+        p95 = durs[min(len(durs) - 1, int(len(durs) * 0.95))] if durs else 0
+        return {
+            "n": n, "ok_n": ok_n, "fail_n": n - ok_n,
+            "rate": round(ok_n * 100.0 / n, 1),
+            "avg": round(avg, 1), "p95": round(p95, 1),
+            "slowest": round(durs[-1], 1) if durs else 0,
+            "days": int(days),
+        }
+
+    # ---- 神经桥审计：每个动作留痕，谁批的、批没批、结果如何 ----
+
+    def bridge_audit_add(self, action: str, payload: str, summary: str,
+                         decision: str, actor: str = "", result: str = "") -> dict:
+        self._run(
+            "INSERT INTO bridge_audit (ts, action, payload, summary, decision, actor, result) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (time.time(), (action or "")[:120], (payload or "")[:2000],
+             (summary or "")[:400], decision, (actor or "")[:80], (result or "")[:1000]),
+            False,
+        )
+        return {"ok": True}
+
+    def bridge_audit_list(self, limit: int = 100, action: str = "") -> list[dict]:
+        if action:
+            return self._run(
+                "SELECT * FROM bridge_audit WHERE action=? ORDER BY id DESC LIMIT ?",
+                (action, int(limit)))
+        return self._run("SELECT * FROM bridge_audit ORDER BY id DESC LIMIT ?", (int(limit),))
 
     # ---- 连接器推送日志：每次推送留痕，成功失败都可查 ----
 

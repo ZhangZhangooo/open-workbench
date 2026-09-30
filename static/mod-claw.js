@@ -56,6 +56,12 @@ export default {
   tab: 'ask',     // ask = 问一问（Ollama） / run = 干活（OpenClaw agent） / docs = 文档
   aiMod: null,
   docsMod: null,
+  agent: '',          // 选中的 agent id，空 = 默认
+  ctxParts: null,     // 注入哪些模块的数据；null = 全给
+  tpls: [],           // 场景模板
+  histRows: [],       // 当前历史列表
+  onlyFav: false,     // 历史是否只看常用
+  queueTimer: null,
 
   mount(el) {
     this.el = el;
@@ -94,22 +100,49 @@ export default {
       <div class="bar" style="padding-top:0;flex-wrap:wrap;gap:6px">
         <span id="clawState"></span>
         <label class="note" style="display:flex;align-items:center;gap:4px;cursor:pointer;margin-left:6px">
-          <input type="checkbox" id="ctxOn" checked> 带入工作台上下文
+          <input type="checkbox" id="ctxOn" checked> 带入上下文
         </label>
-        <button class="btn" id="btnCap" style="height:30px;padding:0 12px;font-size:12px">能力面板</button>
-        <button class="btn" id="btnClear" style="height:30px;padding:0 12px;font-size:12px;margin-left:auto">清空记录</button>
+        <button class="btn" id="btnCtxPick" style="height:28px;padding:0 10px;font-size:12px">选哪些</button>
+        <span class="note" style="margin-left:4px">agent</span>
+        <select id="agentSel" class="cl-mini" style="max-width:160px">
+          <option value="">（默认 agent）</option>
+        </select>
+        <button class="btn" id="btnCap" style="height:28px;padding:0 10px;font-size:12px">能力面板</button>
+        <button class="btn" id="btnStats" style="height:28px;padding:0 10px;font-size:12px">运行统计</button>
+        <button class="btn" id="btnClear" style="height:28px;padding:0 10px;font-size:12px;margin-left:auto">清空记录</button>
       </div>
+      <div id="ctxPick" class="cap-box" style="display:none"></div>
       <div id="capBox" class="cap-box" style="display:none"></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;padding-bottom:8px">
+      <div id="statBox" class="cap-box" style="display:none"></div>
+      <div id="tplRow" style="display:flex;gap:6px;flex-wrap:wrap;padding-bottom:6px">
         ${QUICK.map((q, i) => `<button class="chip" data-q="${i}">${esc(q)}</button>`).join('')}
       </div>
+      <div class="bar" style="padding-top:0;gap:6px;flex-wrap:wrap">
+        <button class="btn" id="btnQueue" style="height:28px;padding:0 10px;font-size:12px">排队跑</button>
+        <span class="note" id="queueInfo"></span>
+      </div>
+      <details class="guide" id="queueBox">
+        <summary>任务队列（一件一件跑，不互相抢）</summary>
+        <div id="queueList" class="note">加载中…</div>
+      </details>
       <details class="guide" id="runHistBox">
         <summary>近期运行（已写入工作台，非仅本地）</summary>
+        <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">
+          <input id="histQ" class="hist-q" placeholder="搜历史任务或结果里的词">
+          <button class="btn slim" id="btnHistGo">搜</button>
+          <button class="btn slim" id="btnHistFav">只看常用</button>
+          <button class="btn slim" id="btnDiff">对比勾选的两条</button>
+        </div>
         <div id="runHist" class="note">加载中…</div>
+        <div id="diffBox" class="diff-box" style="display:none"></div>
       </details>
       <details class="guide" id="bridgeBox">
         <summary>待确认操作（OpenClaw 提交的工作台写操作，需你确认才执行）</summary>
         <div id="bridgeList" class="note">加载中…</div>
+      </details>
+      <details class="guide" id="auditBox">
+        <summary>桥动作审计（提交 / 确认 / 拒绝都留痕）</summary>
+        <div id="auditList" class="note">加载中…</div>
       </details>
       <div class="chat" id="clawChat"></div>
       <div class="composer">
@@ -138,6 +171,15 @@ export default {
         el.querySelector('#clawInput').focus();
       };
     });
+    el.querySelector('#tplRow').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-tpl]');
+      if (!b) return;
+      const t = (this.tpls || []).find((x) => x.id === b.dataset.tpl);
+      if (!t) return;
+      el.querySelector('#clawInput').value = t.task;
+      el.querySelector('#clawInput').focus();
+      toast('模板已填进输入框：' + t.name);
+    });
 
     el.querySelector('#clawGuide').addEventListener('toggle', (e) => {
       if (!e.target.open) localStorage.setItem(SEEN, '1');
@@ -150,9 +192,40 @@ export default {
       if (!on) this.loadCaps();
     };
 
+    el.querySelector('#btnStats').onclick = () => {
+      const box = el.querySelector('#statBox');
+      const on = box.style.display !== 'none';
+      box.style.display = on ? 'none' : '';
+      if (!on) this.loadStats();
+    };
+
+    el.querySelector('#btnCtxPick').onclick = () => {
+      const box = el.querySelector('#ctxPick');
+      const on = box.style.display !== 'none';
+      box.style.display = on ? 'none' : '';
+      if (!on) this.renderCtxPick();
+    };
+
+    el.querySelector('#btnQueue').onclick = () => this.enqueue();
+    el.querySelector('#btnHistGo').onclick = () => this.loadRuns(true);
+    el.querySelector('#btnHistFav').onclick = () => {
+      this.onlyFav = !this.onlyFav;
+      el.querySelector('#btnHistFav').classList.toggle('on', this.onlyFav);
+      this.loadRuns(true);
+    };
+    el.querySelector('#btnDiff').onclick = () => this.showDiff();
+    el.querySelector('#histQ').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); this.loadRuns(true); }
+    });
+    el.querySelector('#auditBox').addEventListener('toggle', (e) => {
+      if (e.target.open) this.loadAudit();
+    });
+
     el.querySelector('#btnRun').onclick = () => this.run();
     el.querySelector('#btnClear').onclick = () => {
       this.history = [];
+      this.onlyFav = false;
+      el.querySelector('#btnHistFav').classList.remove('on');
       localStorage.removeItem(KEY);
       el.querySelector('#clawChat').innerHTML = '';
     };
@@ -166,7 +239,70 @@ export default {
 
     this.loadHistory();
     this.checkInfo();
+    this.loadTemplates();
+    this.loadAgents();
     this.switchTab('ask');
+  },
+
+  /* ---- 场景模板（49）与 agent 下拉（51） ---- */
+
+  async loadTemplates() {
+    try {
+      const d = await api('/api/claw/templates');
+      const rows = d.rows || [];
+      if (!rows.length) return;
+      this.tpls = rows;
+      const box = this.el.querySelector('#tplRow');
+      if (!box) return;
+      box.innerHTML = rows.map((t) =>
+        `<button class="chip tpl" data-tpl="${esc(t.id)}" title="${esc(t.task)}">${esc(t.name)}</button>`
+      ).join('') + box.innerHTML;
+    } catch (_) { /* 保持默认 chips */ }
+  },
+
+  async loadAgents() {
+    const sel = this.el.querySelector('#agentSel');
+    if (!sel) return;
+    try {
+      const d = await api('/api/claw/agents');
+      const rows = d.agents || [];
+      sel.innerHTML = '<option value="">（默认 agent）</option>' + rows.map((a) =>
+        `<option value="${esc(a.id)}">${esc(a.id)}${a.default ? ' · 默认' : ''}</option>`
+      ).join('');
+    } catch (_) { /* 拉不到就只留默认 */ }
+  },
+
+  /* ---- 上下文选择器（50） ---- */
+
+  renderCtxPick() {
+    const box = this.el.querySelector('#ctxPick');
+    const ITEMS = [
+      ['today', '今日待办'], ['projects', '项目'], ['kb', '资料库'],
+      ['daylog', '今日日志'], ['habits', '习惯'], ['inbox', '快速捕捉'], ['cal', '日程'],
+    ];
+    const on = this.ctxParts;   // null = 全给
+    box.innerHTML = `<div class="note" style="margin-bottom:6px">
+        勾选要注入给 OpenClaw 的工作台数据。不勾的项目它完全看不到，也就不会乱碰。</div>
+      <div id="ctxChips">${ITEMS.map(([k, label]) =>
+        `<button class="chip${on === null || on.includes(k) ? ' on' : ''}" data-ctx="${k}">${label}</button>`
+      ).join('')}</div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+        <button class="btn primary" id="btnCtxAll" style="height:28px;padding:0 12px;font-size:12px">全选</button>
+        <button class="btn" id="btnCtxNone" style="height:28px;padding:0 12px;font-size:12px">全不选</button>
+        <span class="note" id="ctxMsg"></span>
+      </div>`;
+    box.querySelectorAll('[data-ctx]').forEach((b) => {
+      b.onclick = () => {
+        const cur = this.ctxParts === null ? ITEMS.map((x) => x[0]) : [...this.ctxParts];
+        const k = b.dataset.ctx;
+        const i = cur.indexOf(k);
+        if (i >= 0) cur.splice(i, 1); else cur.push(k);
+        this.ctxParts = cur;
+        b.classList.toggle('on', i < 0);
+      };
+    });
+    box.querySelector('#btnCtxAll').onclick = () => { this.ctxParts = null; this.renderCtxPick(); };
+    box.querySelector('#btnCtxNone').onclick = () => { this.ctxParts = []; this.renderCtxPick(); };
   },
 
   switchTab(tab, arg) {
@@ -182,8 +318,9 @@ export default {
     if (tab === 'run') {
       this.loadRuns();
       this.loadBridge();
+      this.loadQueue();
       if (this.bridgeTimer) clearInterval(this.bridgeTimer);
-      this.bridgeTimer = setInterval(() => this.loadBridge(), 4000);
+      this.bridgeTimer = setInterval(() => { this.loadBridge(); this.loadQueue(); }, 4000);
       if (arg && arg.task) {
         const inp = el.querySelector('#clawInput');
         if (inp) { inp.value = arg.task; inp.focus(); }
@@ -336,14 +473,24 @@ export default {
     }, 1000);
 
     try {
-      const d = await post('/api/openclaw', { task, ctx: this.el.querySelector('#ctxOn').checked });
+      const d = await post('/api/openclaw', {
+        task,
+        ctx: this.el.querySelector('#ctxOn').checked,
+        ctx_parts: this.ctxParts,
+        agent: this.el.querySelector('#agentSel').value || '',
+      });
       clearInterval(this.timer);
       const ms = Date.now() - t0;
-      const text = d.ok
+      let text = d.ok
         ? (d.reply || '（OpenClaw 没返回正文）')
         : `失败：${d.error || d.reply || '未知原因'}`;
+      if (d.retried) {
+        text += d.ok
+          ? '\n\n（第一次网关抽风，自动重试了一次才成）'
+          : `\n\n（已自动重试一次仍失败；首错：${d.first_error || ''}）`;
+      }
       node.remove();
-      const mnode = this.addMsg('claw', text, ms, d.meta, d.raw);
+      const mnode = this.addMsg('claw', text, ms, { ...(d.meta || {}), dur: d.dur }, d.raw);
       if (d.ok) this.appendWriteback(mnode, task, text);
       this.history.push({ role: 'claw', text, ms, meta: d.meta, raw: d.raw });
       if (this.history.length > 40) this.history = this.history.slice(-40);
@@ -357,6 +504,58 @@ export default {
     this.loadRuns();
     this.running = false;
     btn.disabled = false;
+  },
+
+  /* ---- 任务队列（43）：丢进去排队，一件一件跑 ---- */
+
+  async enqueue() {
+    const box = this.el.querySelector('#clawInput');
+    const task = box.value.trim();
+    if (!task) { toast('先写点什么再排队'); return; }
+    const d = await post('/api/openclaw/queue', {
+      task,
+      ctx: this.el.querySelector('#ctxOn').checked,
+      ctx_parts: this.ctxParts,
+      agent: this.el.querySelector('#agentSel').value || '',
+    });
+    if (!d.ok) { toast(d.error || '入队失败'); return; }
+    box.value = '';
+    this.addMsg('me', task);
+    this.addMsg('claw', `已排进队列（第 ${d.id} 号，前面还有 ${d.waiting - 1} 件）。跑完会出现在下面的队列里。`);
+    toast('已排队');
+    this.loadQueue();
+  },
+
+  async loadQueue() {
+    const box = this.el.querySelector('#queueList');
+    if (!box) return;
+    try {
+      const d = await api('/api/openclaw/queue');
+      const rows = (d.rows || []).slice().reverse();
+      const info = this.el.querySelector('#queueInfo');
+      if (info) {
+        info.textContent = rows.length
+          ? `队列 ${rows.length} 件（等 ${d.waiting}｜跑 ${d.running}）`
+          : '队列空着';
+      }
+      const sb = this.el.querySelector('#queueBox summary');
+      if (sb) sb.textContent = rows.length
+        ? `任务队列（等 ${d.waiting}｜跑 ${d.running}｜共 ${rows.length}）`
+        : '任务队列（空）';
+      if (!rows.length) { box.innerHTML = '<span class="note">队列是空的。写个任务点「排队跑」。</span>'; return; }
+      const tag = { waiting: ['', '等'], running: ['warn', '跑'], done: ['ok', '成'], failed: ['err', '败'] };
+      box.innerHTML = rows.map((r) => {
+        const [cls, label] = tag[r.status] || ['', r.status];
+        return `<div style="display:flex;gap:8px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px">
+          <span class="tag ${cls}" style="flex:none">${label}</span>
+          <span class="note" style="flex:none">#${r.id}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.task || '')}</span>
+          <span class="note" style="flex:none">${r.ms ? (r.ms / 1000).toFixed(1) + 's' : ''}</span>
+        </div>${r.preview ? `<div class="note" style="padding:0 0 5px 26px">${esc(r.preview.slice(0, 160))}</div>` : ''}`;
+      }).join('');
+    } catch (_) {
+      box.innerHTML = '<span class="note">读取失败</span>';
+    }
   },
 
   /* ---- 结果写回工作台：让 OpenClaw 的输出真正落进工作台的各个模块 ---- */
@@ -444,21 +643,212 @@ export default {
     toast(r && r.ok ? '已推到微信' : '推送失败：' + (r && r.error || ''));
   },
 
-  /* ---- 统一活动流：读工作台里记的 openclaw_runs ---- */
+  /* ---- 统一活动流：读工作台里记的 openclaw_runs（含搜索 44 / 常用 45 / 对比 46） ---- */
 
-  async loadRuns() {
+  async loadRuns(useQuery) {
     const box = this.el.querySelector('#runHist');
     if (!box) return;
+    const q = useQuery ? (this.el.querySelector('#histQ').value || '').trim() : '';
     try {
-      const d = await api('/api/openclaw/history?limit=20');
-      const rows = (d.rows || []);
-      if (!rows.length) { box.innerHTML = '<span class="note">还没有运行记录</span>'; return; }
+      const d = this.onlyFav
+        ? await api('/api/openclaw/favs')
+        : (q
+          ? await api('/api/openclaw/search?q=' + encodeURIComponent(q) + '&limit=50')
+          : await api('/api/openclaw/history?limit=20'));
+      let rows = d.rows || [];
+      if (this.onlyFav && q) {
+        rows = rows.filter((r) => (r.task || '').includes(q) || (r.reply || '').includes(q));
+      }
+      this.histRows = rows;
+      const sb = this.el.querySelector('#runHistBox summary');
+      const base = this.onlyFav ? '常用任务' : (q ? `搜「${q}」` : '近期运行');
+      if (sb) sb.textContent = `${base}（${rows.length} 条，已写入工作台）`;
+      if (!rows.length) {
+        box.innerHTML = `<span class="note">${q ? '没搜到。换个词试试。' : (this.onlyFav ? '还没有标常用。点记录左边的 ☆ 收藏。' : '还没有运行记录')}</span>`;
+        return;
+      }
       box.innerHTML = rows.map((r) => `
-        <div style="display:flex;gap:8px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px">
+        <div class="run-row" data-id="${r.id}" style="display:flex;gap:7px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px">
+          <button class="fav-star${r.fav ? ' on' : ''}" data-act="fav" title="${r.fav ? '取消常用' : '标为常用'}">${r.fav ? '★' : '☆'}</button>
+          <input type="checkbox" class="run-pick" data-act="pick" style="flex:none">
           <span class="tag ${r.ok ? 'ok' : 'err'}" style="flex:none">${r.ok ? '成' : '败'}</span>
-          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.task || '')}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                title="${esc(r.task || '')}">${esc(r.task || '')}</span>
+          ${r.agent ? `<span class="note" style="flex:none">${esc(r.agent)}</span>` : ''}
+          ${r.dur ? `<span class="note" style="flex:none">${Number(r.dur).toFixed(1)}s</span>` : ''}
           <span class="note" style="flex:none">${esc((r.ts ? new Date(r.ts * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''))}</span>
+          <button class="btn slim" data-act="rerun" style="flex:none">重跑</button>
         </div>`).join('');
+
+      box.querySelectorAll('.run-row [data-act]').forEach((b) => {
+        const id = +b.closest('.run-row').dataset.id;
+        b.onclick = () => {
+          const a = b.dataset.act;
+          if (a === 'fav') this.toggleFav(id);
+          else if (a === 'rerun') this.rerun(id);
+          else if (a === 'pick') { /* 勾选由 showDiff 读 */ }
+        };
+      });
+    } catch (_) {
+      box.innerHTML = '<span class="note">读取失败</span>';
+    }
+  },
+
+  async toggleFav(id) {
+    const r = await post('/api/openclaw/fav', { id });
+    if (!r.ok) { toast(r.error || '没成功'); return; }
+    toast(r.fav ? '已标为常用，下次一键重跑' : '已取消常用');
+    this.loadRuns();
+  },
+
+  async rerun(id) {
+    if (this.running) { toast('正在跑一件，等它完了再重跑'); return; }
+    const row = this.histRows.find((x) => x.id === id) || {};
+    this.running = true;
+    const btn = this.el.querySelector('#btnRun');
+    if (btn) btn.disabled = true;
+    const node = this.addMsg('claw', '重跑中…');
+    const bub = node.querySelector('.claw-text');
+    try {
+      const d = await post('/api/openclaw/rerun', {
+        id,
+        ctx: this.el.querySelector('#ctxOn').checked,
+        ctx_parts: this.ctxParts,
+        agent: this.el.querySelector('#agentSel').value || '',
+      });
+      node.remove();
+      const text = d.ok ? (d.reply || '（没返回正文）') : `失败：${d.error || '未知原因'}`;
+      const mnode = this.addMsg('claw', `【重跑 #${id}】${row.task || d.task || ''}\n\n${text}`,
+        (d.dur || 0) * 1000, d.meta, d.raw);
+      if (d.ok) this.appendWriteback(mnode, row.task || d.task || '', text);
+    } catch (e) {
+      node.remove();
+      this.addMsg('claw', '重跑失败：' + e.message);
+    }
+    this.running = false;
+    if (btn) btn.disabled = false;
+    this.loadRuns();
+  },
+
+  /* 结果对比（46）：把勾选的两条完整正文取回来做 diff */
+  async showDiff() {
+    const picked = [...this.el.querySelectorAll('.run-row')]
+      .filter((n) => n.querySelector('.run-pick') && n.querySelector('.run-pick').checked)
+      .map((n) => +n.dataset.id);
+    const box = this.el.querySelector('#diffBox');
+    if (picked.length !== 2) { toast('勾两条才能对比（不多不少）'); return; }
+    box.style.display = '';
+    box.innerHTML = '<div class="note">取回两次结果…</div>';
+    const [a, b] = await Promise.all(picked.map((id) => api('/api/openclaw/get?id=' + id)));
+    if (!a.ok || !b.ok) { box.innerHTML = '<div class="note">有一条取不回来了</div>'; return; }
+    const ra = a.row || {}, rb = b.row || {};
+    const la = (ra.reply || '').split('\n');
+    const lb = (rb.reply || '').split('\n');
+    const ops = this.diffLines(la, lb);
+    const add = ops.filter((o) => o.k === '+').length;
+    const del = ops.filter((o) => o.k === '-').length;
+    box.innerHTML = `<div class="note" style="margin-bottom:6px">
+        上面那条 #${ra.id}（${ra.ok ? '成' : '败'}）↔ 下面 #${rb.id}（${rb.ok ? '成' : '败'}）
+        · 差 ${add} 行新增 / ${del} 行删除</div>` +
+      ops.map((o) => `<div class="dr ${o.k === '+' ? 'add' : o.k === '-' ? 'del' : ''}">${
+        o.k === ' ' ? '&nbsp;&nbsp;' : esc(o.k) + ' '}${esc(o.t)}</div>`).join('');
+  },
+
+  /* 行级 diff：先掐掉相同的头尾，中间用朴素 LCS —— 结果文本都不长，够用 */
+  diffLines(a, b) {
+    let s = 0;
+    while (s < a.length && s < b.length && a[s] === b[s]) s++;
+    let ea = a.length - 1;
+    let eb = b.length - 1;
+    while (ea >= s && eb >= s && a[ea] === b[eb]) { ea--; eb--; }
+    const midA = a.slice(s, ea + 1);
+    const midB = b.slice(s, eb + 1);
+    const out = a.slice(0, s).map((t) => ({ k: ' ', t }));
+    const n = midA.length;
+    const m = midB.length;
+    if (n * m > 40000) {   // 太大就退化成「全删全加」，别把浏览器卡死
+      midA.forEach((t) => out.push({ k: '-', t }));
+      midB.forEach((t) => out.push({ k: '+', t }));
+    } else {
+      const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+      for (let i = n - 1; i >= 0; i--) {
+        for (let j = m - 1; j >= 0; j--) {
+          dp[i][j] = midA[i] === midB[j]
+            ? dp[i + 1][j + 1] + 1
+            : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+      }
+      let i = 0;
+      let j = 0;
+      while (i < n && j < m) {
+        if (midA[i] === midB[j]) { out.push({ k: ' ', t: midA[i] }); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ k: '-', t: midA[i] }); i++; }
+        else { out.push({ k: '+', t: midB[j] }); j++; }
+      }
+      while (i < n) { out.push({ k: '-', t: midA[i] }); i++; }
+      while (j < m) { out.push({ k: '+', t: midB[j] }); j++; }
+    }
+    for (let k = ea + 1; k < a.length; k++) out.push({ k: ' ', t: a[k] });
+    return out;
+  },
+
+  /* ---- 运行统计（47） ---- */
+
+  async loadStats() {
+    const box = this.el.querySelector('#statBox');
+    box.innerHTML = '<div class="note">算…</div>';
+    try {
+      const [d7, d30] = await Promise.all([
+        api('/api/openclaw/stats?days=7'),
+        api('/api/openclaw/stats?days=30'),
+      ]);
+      const card = (label, s) => `
+        <div class="cap-sec">
+          <div class="cap-h">${label}</div>
+          ${s.n ? `<div class="cap-row">
+            <span class="tag ${s.rate >= 90 ? 'ok' : s.rate >= 60 ? 'warn' : 'err'}">成功 ${s.rate}%</span>
+            <span class="note">${s.ok_n} 成 / ${s.fail_n} 败 · 共 ${s.n} 次</span>
+          </div>
+          <div class="cap-row">
+            <span class="note">平均 ${s.avg}s · P95 ${s.p95}s · 最慢 ${s.slowest}s</span>
+          </div>` : '<div class="note">这段时间还没跑过。</div>'}
+        </div>`;
+      box.innerHTML = card('最近 7 天', d7) + card('最近 30 天', d30) +
+        `<div class="note" style="margin-top:4px">P95 = 100 次里有 95 次比它快。用它估「最坏大概等多久」。</div>`;
+    } catch (e) {
+      box.innerHTML = `<div class="note">算不出来：${esc(e.message)}</div>`;
+    }
+  },
+
+  /* ---- 桥动作审计（52） ---- */
+
+  async loadAudit() {
+    const box = this.el.querySelector('#auditList');
+    if (!box) return;
+    box.innerHTML = '加载中…';
+    try {
+      const d = await api('/api/bridge/audit?limit=100');
+      const rows = d.rows || [];
+      const sb = this.el.querySelector('#auditBox summary');
+      if (sb) sb.textContent = `桥动作审计（${rows.length} 条留痕）`;
+      if (!rows.length) { box.innerHTML = '<span class="note">还没有桥动作。OpenClaw 提交写操作时会自动留痕。</span>'; return; }
+      const DEC = {
+        submitted: ['', '已提交'], confirmed: ['ok', '已执行'],
+        confirmed_failed: ['err', '执行失败'], rejected: ['warn', '已拒绝'],
+      };
+      box.innerHTML = rows.map((r) => {
+        const [cls, label] = DEC[r.decision] || ['', r.decision];
+        return `<div style="padding:6px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px">
+          <div style="display:flex;gap:8px;align-items:baseline">
+            <span class="tag ${cls}" style="flex:none">${label}</span>
+            <span class="tag" style="flex:none">${esc(r.action || '')}</span>
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.summary || '')}</span>
+            <span class="note" style="flex:none">${esc(r.actor || '')}</span>
+            <span class="note" style="flex:none">${esc(r.ts ? new Date(r.ts * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')}</span>
+          </div>
+          ${r.result && r.result !== 'ok' ? `<div class="note" style="padding-left:6px">${esc(r.result.slice(0, 200))}</div>` : ''}
+        </div>`;
+      }).join('');
     } catch (_) {
       box.innerHTML = '<span class="note">读取失败</span>';
     }

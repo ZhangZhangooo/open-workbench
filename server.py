@@ -136,6 +136,157 @@ STORE = store.Store()
 
 DAY = lambda: time.strftime("%Y-%m-%d")  # noqa: E731
 
+def _bridge_summary(action: str, p: dict) -> str:
+    """把一条桥动作说成人话，写进审计日志用（前端那份是给界面看的，这份给留痕）。"""
+    p = p or {}
+    g = lambda k, d="": str(p.get(k) if p.get(k) is not None else d)  # noqa: E731
+    if action == "today/add":
+        return "今日待办：" + g("text")
+    if action == "today/toggle":
+        return "待办勾选：#" + g("id") + " → " + ("完成" if str(p.get("done", 1)) == "1" else "取消")
+    if action == "today/del":
+        return "删待办：#" + g("id")
+    if action == "kb/save":
+        return "资料库：" + g("title")
+    if action == "projects/save":
+        return "项目：" + g("name")
+    if action == "cal/add":
+        return "日历：%s %s–%s %s" % (g("day"), g("start"), g("end"), g("title"))
+    if action == "reminders/add":
+        return "提醒：" + g("text")
+    if action == "inbox/add":
+        return "捕捉：" + g("text")
+    return action + (" #" + g("id") if p.get("id") else "")
+
+
+# ---- OpenClaw 预设任务模板：按场景预写，点一下就填进输入框 ----
+CLAW_TEMPLATES = [
+    {"id": "tidy-files", "name": "整理文件", "hint": "翻目录、找重复、报大文件",
+     "task": "扫一遍我的 C 盘下载文件夹和桌面，列出：最占地方的 10 个文件、"
+             "看起来重复的文件组、还有超过 90 天没动过的大文件。只列不删，"
+             "给出建议的处理方式。"},
+    {"id": "daily-summary", "name": "写今日总结", "hint": "结合工作台上下文",
+     "task": "根据上下文里今天的待办完成情况和日志，写一份今天的工作总结，"
+             "分「做完的」「没做完的」「明天先做哪件」三段，每段不超过 5 行。"},
+    {"id": "sys-check", "name": "查系统状态", "hint": "磁盘/内存/进程",
+     "task": "查一下这台机器的整体状态：三个盘各剩多少空间、内存占用、"
+             "CPU 占用最高的 5 个进程。用表格回我，并指出有没有需要马上处理的。"},
+    {"id": "room-plan", "name": "房间布置建议", "hint": "20 平米长方形",
+     "task": "我有个 20 平米的长方形房间要布置，需要放下床、书桌、衣柜和一台台式机。"
+             "给我 2 套布局方案，说明各自取舍，并列出需要买的东西和大致预算。"},
+    {"id": "money-idea", "name": "赚钱方向评估", "hint": "诚实优先，别画饼",
+     "task": "我还是学生，时间有限、没本钱。评估一下我目前能做的几个副业方向，"
+             "按「上手难度 / 每月能挣多少 / 要投入多少时间」打分，"
+             "并明确指出哪些是坑。别安慰我，说实话。"},
+    {"id": "read-note", "name": "读书笔记", "hint": "把资料库里的东西写成小论文",
+     "task": "基于上下文里资料库的近期条目，帮我整理成一篇有观点的小论文："
+             "先给结论，再给三条依据，最后写一段「我不同意的地方」。"},
+]
+
+# OpenClaw 的 agent 跑起来是重活（会起自己的进程、碰系统资源），
+# 同时丢几件事进去互相抢会出怪问题。这里排成一队一个接一个跑。
+_Q_LOCK = threading.Lock()
+_Q: list[dict] = []
+_Q_SEQ = [0]
+_Q_WORKER: list[threading.Thread] = []
+
+
+def _q_snapshot() -> list[dict]:
+    with _Q_LOCK:
+        return [dict(x) for x in _Q]
+
+
+def _q_add(task: str, ctx: str, agent: str, timeout: int, parts=None) -> dict:
+    with _Q_LOCK:
+        _Q_SEQ[0] += 1
+        item = {
+            "id": _Q_SEQ[0], "task": task, "status": "waiting", "ts": time.time(),
+            "ms": 0, "error": "", "preview": "", "agent": agent,
+            "_ctx": ctx, "_timeout": timeout, "_parts": parts,
+        }
+        _Q.append(item)
+    _q_ensure_worker()
+    return {"ok": True, "id": item["id"], "waiting": len(_q_snapshot())}
+
+
+def _q_clear() -> dict:
+    with _Q_LOCK:
+        keep = [x for x in _Q if x["status"] in ("waiting", "running")]
+        gone = len(_Q) - len(keep)
+        _Q[:] = keep
+    return {"ok": True, "cleared": gone}
+
+
+def _q_ensure_worker() -> None:
+    if any(t.is_alive() for t in _Q_WORKER):
+        return
+    t = threading.Thread(target=_q_loop, daemon=True)
+    _Q_WORKER.append(t)
+    t.start()
+
+
+def _q_loop() -> None:
+    while True:
+        with _Q_LOCK:
+            nxt = next((x for x in _Q if x["status"] == "waiting"), None)
+            if nxt is None:
+                return
+            nxt["status"] = "running"
+            nxt["ms"] = 0
+        t0 = time.time()
+        try:
+            r = _claw_run_with_retry(nxt["task"], nxt.get("_ctx") or "",
+                                     int(nxt.get("_timeout") or 240),
+                                     nxt.get("agent") or "")
+            ok = bool(r.get("ok"))
+            reply = (r.get("reply") or r.get("error") or "")
+            err = "" if ok else (r.get("error") or reply or "未知原因")
+        except Exception as e:  # noqa: BLE001
+            ok, reply, err = False, "", str(e)
+        ms = int((time.time() - t0) * 1000)
+        with _Q_LOCK:
+            nxt["status"] = "done" if ok else "failed"
+            nxt["ms"] = ms
+            nxt["error"] = (err or "")[:400]
+            nxt["preview"] = (reply or "")[:400]
+            nxt.pop("_ctx", None)
+        try:
+            STORE.openclaw_log(nxt["task"], reply, 1 if ok else 0, "queue",
+                               nxt.get("agent") or "", ms / 1000.0, nxt["id"])
+        except Exception:
+            pass
+
+
+# Gateway 挂掉这类错通常是抽风，重试一次八成能过；任务本身写错就没必要重试
+_CLAW_RETRY_RE = re.compile(
+    r"no gateway|gateway (is )?not running|start the gateway|gateway unavailable"
+    r"|ECONNREFUSED|ETIMEDOUT|socket hang up|timed? ?out|rate ?limit|429|50[234]",
+    re.I,
+)
+
+
+def _claw_run_with_retry(task: str, ctx: str, timeout: int, agent: str = "",
+                         model: str = "") -> dict:
+    """失败重试：只在「像抽风」的错误上自动再试一次，并把试了几次带回给前端。"""
+    r = integrations.openclaw_run(task, ctx, timeout, agent, model)
+    if r.get("ok"):
+        r["attempts"] = 1
+        return r
+    blob = (r.get("error") or "") + " " + (r.get("raw") or "")
+    if not _CLAW_RETRY_RE.search(blob):
+        r["attempts"] = 1
+        r["retried"] = False
+        return r
+    r["attempts"] = 1
+    r["retried"] = True
+    time.sleep(1.2)
+    r2 = integrations.openclaw_run(task, ctx, timeout, agent, model)
+    r2["attempts"] = 2
+    r2["retried"] = True
+    r2["first_error"] = (r.get("error") or "")[:300]
+    return r2
+
+
 # 视觉/OCR 模型的名字特征。Ollama 里能读图的都带这类关键词，
 # 纯文本模型不会（gpt-oss / kimi / glm / deepseek / minimax 都不带）
 VISION_HINT = ("llava", "vision", "vl", "minicpm", "internvl", "qwen2.5vl",
@@ -546,45 +697,89 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": str(e)}
 
-    def _openclaw_context(self) -> str:
-        """拼一份工作台真实状态快照，注入给 OpenClaw 当背景上下文。"""
+    def _openclaw_context(self, parts=None) -> str:
+        """拼一份工作台真实状态快照，注入给 OpenClaw 当背景上下文。
+
+        parts 是模块勾选（['today','projects','kb','daylog','habits','inbox','files','cal']）。
+        None 表示全给（保持老行为）；空列表表示什么都不带。
+        """
+        want = None if parts is None else {str(x) for x in parts}
         day = DAY()
         lines = []
-        pend = STORE.today_pending(day)
-        if pend:
-            lines.append("今日待办（%s）：" % day)
-            for t in pend[:12]:
-                lines.append("  - " + (t.get("text") or ""))
-        try:
-            projs = STORE.projects_list() or []
-        except Exception:
-            projs = []
-        if projs:
-            active = [p for p in projs if (p.get("status") or "").lower()
-                      not in ("完成", "done", "归档", "archived", "关闭")]
-            if active:
-                lines.append("进行中的项目：")
-                for p in active[:8]:
-                    line = "  - " + (p.get("name") or "")
-                    if p.get("status"):
-                        line += " [" + p["status"] + "]"
-                    if p.get("next_step"):
-                        line += " 下一步：" + p["next_step"]
-                    lines.append(line)
-        try:
-            kbs = STORE.kb_list() or []
-        except Exception:
-            kbs = []
-        if kbs:
-            lines.append("资料库近期条目：")
-            for k in kbs[:6]:
-                lines.append("  - " + (k.get("title") or "(无标题)"))
-        try:
-            dl = STORE.daylog_get(day)
-        except Exception:
-            dl = ""
-        if dl and dl.strip():
-            lines.append("今日日志摘要：" + dl.strip()[:600])
+
+        def on(k: str) -> bool:
+            return want is None or k in want
+
+        if on("today"):
+            try:
+                pend = STORE.today_pending(day)
+            except Exception:
+                pend = []
+            if pend:
+                lines.append("今日待办（%s）：" % day)
+                for t in pend[:12]:
+                    lines.append("  - " + (t.get("text") or ""))
+        if on("projects"):
+            try:
+                projs = STORE.projects_list() or []
+            except Exception:
+                projs = []
+            if projs:
+                active = [p for p in projs if (p.get("status") or "").lower()
+                          not in ("完成", "done", "归档", "archived", "关闭")]
+                if active:
+                    lines.append("进行中的项目：")
+                    for p in active[:8]:
+                        line = "  - " + (p.get("name") or "")
+                        if p.get("status"):
+                            line += " [" + p["status"] + "]"
+                        if p.get("next_step"):
+                            line += " 下一步：" + p["next_step"]
+                        lines.append(line)
+        if on("kb"):
+            try:
+                kbs = STORE.kb_list() or []
+            except Exception:
+                kbs = []
+            if kbs:
+                lines.append("资料库近期条目：")
+                for k in kbs[:6]:
+                    lines.append("  - " + (k.get("title") or "(无标题)"))
+        if on("daylog"):
+            try:
+                dl = STORE.daylog_get(day)
+            except Exception:
+                dl = ""
+            if dl and dl.strip():
+                lines.append("今日日志摘要：" + dl.strip()[:600])
+        if on("habits"):
+            try:
+                hs = STORE.habits_list() or []
+            except Exception:
+                hs = []
+            if hs:
+                lines.append("在跟的习惯：")
+                for h in hs[:8]:
+                    lines.append("  - " + (h.get("name") or ""))
+        if on("inbox"):
+            try:
+                ib = STORE.inbox_list() or []
+            except Exception:
+                ib = []
+            if ib:
+                lines.append("快速捕捉（还没归置）：")
+                for it in ib[:8]:
+                    lines.append("  - " + (it.get("text") or "")[:80])
+        if on("cal"):
+            try:
+                evs = [e for e in (STORE.events_list(day[:7]) or []) if e.get("day") == day]
+            except Exception:
+                evs = []
+            if evs:
+                lines.append("今天的日程：")
+                for e in evs[:10]:
+                    lines.append("  - %s–%s %s" % (e.get("start") or "", e.get("end") or "",
+                                                   e.get("title") or ""))
         return "\n".join(lines) if lines else "(工作台暂无内容)"
 
     def _bridge_execute(self, action: str, payload: dict) -> dict:
@@ -1149,6 +1344,51 @@ class Handler(BaseHTTPRequestHandler):
                 int(parse_qs(u.query).get("limit", ["30"])[0] or 30))})
             return
 
+        if p == "/api/openclaw/search":
+            q = parse_qs(u.query)
+            self._json({"rows": STORE.openclaw_search(
+                q.get("q", [""])[0], q.get("only", ["all"])[0],
+                int(q.get("limit", ["50"])[0] or 50))})
+            return
+
+        if p == "/api/openclaw/favs":
+            self._json({"rows": STORE.openclaw_favs()})
+            return
+
+        if p == "/api/openclaw/get":
+            row = STORE.openclaw_get(int(parse_qs(u.query).get("id", ["0"])[0] or 0))
+            self._json({"ok": bool(row), "row": row})
+            return
+
+        if p == "/api/openclaw/stats":
+            days = int(parse_qs(u.query).get("days", ["30"])[0] or 30)
+            self._json(STORE.openclaw_stats(days))
+            return
+
+        if p == "/api/openclaw/queue":
+            now = time.time()
+            rows = _q_snapshot()
+            for x in rows:
+                if x["status"] == "running" and x.get("ms"):
+                    x["ms"] = int((now - x["ts"]) * 1000)
+                x.pop("_parts", None)
+            self._json({
+                "rows": rows,
+                "waiting": sum(1 for x in rows if x["status"] == "waiting"),
+                "running": sum(1 for x in rows if x["status"] == "running"),
+            })
+            return
+
+        if p == "/api/bridge/audit":
+            q = parse_qs(u.query)
+            self._json({"rows": STORE.bridge_audit_list(
+                int(q.get("limit", ["100"])[0] or 100), q.get("action", [""])[0])})
+            return
+
+        if p == "/api/claw/templates":
+            self._json({"rows": CLAW_TEMPLATES})
+            return
+
         if p == "/api/bridge/pending":
             self._json({"rows": STORE.bridge_pending_list()})
             return
@@ -1595,21 +1835,81 @@ class Handler(BaseHTTPRequestHandler):
             if not task:
                 self._json({"ok": False, "error": "空任务"})
                 return
+            parts = body.get("ctx_parts")
             ctx = ""
             if body.get("ctx", True):
                 try:
-                    ctx = self._openclaw_context()
+                    ctx = self._openclaw_context(parts if isinstance(parts, list) else None)
                 except Exception:
                     ctx = ""
-            r = integrations.openclaw_run(task, ctx, int(body.get("timeout", 240)))
+            agent = (body.get("agent") or "").strip()
+            model = (body.get("model") or "").strip()
+            t0 = time.time()
+            r = _claw_run_with_retry(task, ctx, int(body.get("timeout", 240)), agent, model)
+            dur = time.time() - t0
             # 运行记录写回工作台（统一活动），不依赖 OpenClaw 是否成功
             try:
                 STORE.openclaw_log(
                     task, (r.get("reply") or r.get("error") or "")[:4000],
-                    bool(r.get("ok")), "run",
+                    bool(r.get("ok")), "run", agent, dur, 0,
                 )
             except Exception:
                 pass
+            r["dur"] = round(dur, 1)
+            self._json(r)
+            return
+
+        if p == "/api/openclaw/queue":
+            task = (body.get("task") or "").strip()
+            if not task:
+                self._json({"ok": False, "error": "空任务"})
+                return
+            parts = body.get("ctx_parts")
+            ctx = ""
+            if body.get("ctx", True):
+                try:
+                    ctx = self._openclaw_context(parts if isinstance(parts, list) else None)
+                except Exception:
+                    ctx = ""
+            self._json(_q_add(task, ctx, (body.get("agent") or "").strip(),
+                              int(body.get("timeout", 240) or 240),
+                              parts if isinstance(parts, list) else None))
+            return
+
+        if p == "/api/openclaw/queue/clear":
+            self._json(_q_clear())
+            return
+
+        if p == "/api/openclaw/fav":
+            self._json(STORE.openclaw_fav(int(body.get("id", 0) or 0),
+                                          body.get("on")))
+            return
+
+        if p == "/api/openclaw/rerun":
+            oid = int(body.get("id", 0) or 0)
+            row = STORE.openclaw_get(oid)
+            if not row:
+                self._json({"ok": False, "error": "没这条记录"})
+                return
+            task = (row.get("task") or "").strip()
+            parts = body.get("ctx_parts")
+            ctx = ""
+            if body.get("ctx", True):
+                try:
+                    ctx = self._openclaw_context(parts if isinstance(parts, list) else None)
+                except Exception:
+                    ctx = ""
+            agent = (body.get("agent") or row.get("agent") or "").strip()
+            t0 = time.time()
+            r = _claw_run_with_retry(task, ctx, int(body.get("timeout", 240)), agent)
+            dur = time.time() - t0
+            try:
+                STORE.openclaw_log(task, (r.get("reply") or r.get("error") or "")[:4000],
+                                   bool(r.get("ok")), "rerun", agent, dur, 0)
+            except Exception:
+                pass
+            r["dur"] = round(dur, 1)
+            r["task"] = task
             self._json(r)
             return
 
@@ -1633,6 +1933,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "action/payload 缺失"})
                     return
                 pid = STORE.bridge_enqueue(action, payload)
+                try:
+                    STORE.bridge_audit_add(action, json.dumps(payload, ensure_ascii=False),
+                                           _bridge_summary(action, payload),
+                                           "submitted", body.get("actor", "openclaw"),
+                                           "待确认 #%s" % pid)
+                except Exception:
+                    pass
                 self._json({"ok": True, "pending": True, "id": pid,
                             "hint": "已提交，请在工作台「OpenClaw → 待确认」里确认后才会执行"})
                 return
@@ -1649,11 +1956,29 @@ class Handler(BaseHTTPRequestHandler):
                 res = self._bridge_execute(row["action"], pl)
                 STORE.bridge_resolve(rid, "done" if res.get("ok") else "failed",
                                      str(res.get("error") or "ok"))
+                try:
+                    STORE.bridge_audit_add(row["action"], row.get("payload") or "",
+                                           _bridge_summary(row["action"], pl),
+                                           "confirmed" if res.get("ok") else "confirmed_failed",
+                                           "user", str(res.get("error") or "ok"))
+                except Exception:
+                    pass
                 self._json({"ok": True, "result": res})
                 return
             if p == "/api/bridge/reject":
                 rid = int(body.get("id", 0) or 0)
+                row = STORE.bridge_get(rid) or {}
                 STORE.bridge_resolve(rid, "rejected", "用户拒绝")
+                try:
+                    pl = json.loads(row.get("payload") or "{}")
+                except Exception:
+                    pl = {}
+                try:
+                    STORE.bridge_audit_add(row.get("action") or "", row.get("payload") or "",
+                                           _bridge_summary(row.get("action") or "", pl),
+                                           "rejected", "user", "用户拒绝")
+                except Exception:
+                    pass
                 self._json({"ok": True})
                 return
             self._json({"ok": False, "error": "未知桥端点"}, 404)

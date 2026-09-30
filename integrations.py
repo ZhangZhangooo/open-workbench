@@ -257,11 +257,18 @@ def resolve_openclaw_cmd() -> list[str] | None:
     """返回能实际跑 openclaw 的命令列表；找不到返回 None。
 
     优先级：
+      ⓪ 环境变量 WB_OPENCLAW_CMD 显式指定的命令（用 | 分隔可带参数，
+         例如 python 脚本包装器 / 便携版路径；给装了非标准位置的人一个开关）
       ① PATH 上的 openclaw（最通用：官方脚本 / brew / npm 全局都靠它）
       ② 上面列的常见安装目录里的绝对路径（不依赖 server 进程的 PATH）
       ③ Windows npm 装法：node + openclaw.mjs
     /api/claw/info 的「已就位」和真正跑任务都用同一个判定，避免一个说有、一个说没有。
     """
+    forced = (os.environ.get("WB_OPENCLAW_CMD") or "").strip()
+    if forced:
+        parts = [p.strip() for p in forced.split("|") if p.strip()]
+        if parts:
+            return parts
     w = shutil.which("openclaw")
     if w:
         return [w]
@@ -537,11 +544,13 @@ _NEURO_MANUAL = """[工作台神经桥——你正运行在用户的本地数字
 绝不用桥执行删除系统文件、rm/del 类终端命令或任何破坏性操作——那不在你的权限内。"""
 
 
-def openclaw_run(task: str, ctx: str = "", timeout: int = 240) -> dict:
+def openclaw_run(task: str, ctx: str = "", timeout: int = 240,
+                 agent: str = "", model: str = "") -> dict:
     """优先走已在运行的 Gateway；Gateway 没起时才回退 --local。
 
     ctx 是工作台注入的真实上下文（今日待办/项目/资料库/日志），作为背景块拼进任务，
     让 OpenClaw 不再是瞎子。空串表示不注入。
+    agent 非空时用 --agent 指定那个工作间（CLI 支持 --agent <id>，覆盖路由绑定）。
     """
     base = _openclaw_base()
 
@@ -558,14 +567,20 @@ def openclaw_run(task: str, ctx: str = "", timeout: int = 240) -> dict:
 
     msg = msg + "\n\n" + _NEURO_MANUAL
 
-    cmd = base + ["agent", "-m", msg, "--json"]
+    extra: list[str] = []
+    if agent:
+        extra += ["--agent", agent]
+    if model:
+        extra += ["--model", model]
+
+    cmd = base + ["agent", "-m", msg, "--json"] + extra
     r = _exec(cmd, timeout)
 
     if not r["ok"] and re.search(
         r"no gateway|gateway (is )?not running|start the gateway|gateway unavailable",
         r["raw"], re.I,
     ):
-        r = _exec(base + ["agent", "-m", msg, "--local", "--json"], timeout)
+        r = _exec(base + ["agent", "-m", msg, "--local", "--json"] + extra, timeout)
     return r
 
 

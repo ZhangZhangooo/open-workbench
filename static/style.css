@@ -365,6 +365,45 @@ main {
 .msg-acts button:hover { background: var(--accent-soft); color: var(--accent); }
 .chat.drop-on { outline: 2px dashed var(--accent); outline-offset: -6px; border-radius: 10px; }
 
+/* E 域：OpenClaw agent 下拉 / 历史搜索 / 结果对比 */
+.cl-mini {
+  height: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+.hist-q {
+  flex: 1;
+  min-width: 140px;
+  height: 28px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12.5px;
+}
+.chip.tpl { border-color: var(--accent); color: var(--accent); }
+.diff-box {
+  max-height: 340px;
+  overflow: auto;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.dr { font-family: ui-monospace, Consolas, monospace; }
+.dr.add { background: rgba(54, 211, 153, .14); }
+.dr.del { background: rgba(226, 59, 59, .14); }
+
 .tag-x:hover { color: #e23b3b; }
 
 .row .nm {
