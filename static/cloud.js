@@ -15,10 +15,22 @@
   // 走云端的集合
   const SYNC = ['tasks', 'projects', 'reminders', 'today', 'kv'];
 
-  const isPublished = () => {
-    const h = location.hostname;
-    return h !== 'localhost' && h !== '127.0.0.1' && h !== '0.0.0.0';
+  // 只有真正发布到公网域名时才走云同步。
+  // 局域网地址也是「本地」—— 手机 / 平板用 192.168.x.x 连过来属于自家网络，
+  // 不能当成已发布，否则会被弹「登录以同步工作台」白白要求填邮箱。
+  const isLocalHost = (h) => {
+    if (!h) return true;
+    if (h === 'localhost' || h === '0.0.0.0' || h === '::1') return true;
+    if (h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.lan')) return true;
+    if (/^127\./.test(h)) return true;                        // 整个回环段 127.0.0.0/8
+    if (/^192\.168\./.test(h)) return true;                   // 家用网段
+    if (/^10\./.test(h)) return true;                         // 私有 A 类
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;    // 私有 B 类
+    if (/^169\.254\./.test(h)) return true;                   // link-local
+    return false;
   };
+
+  const isPublished = () => !isLocalHost(location.hostname);
 
   let cloud = null;          // WorkBuddyCloud 实例
   let active = false;        // 是否处于云模式（已发布域名）

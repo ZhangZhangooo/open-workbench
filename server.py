@@ -1884,6 +1884,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", MIME.get(ext, "application/octet-stream"))
         self.send_header("Content-Length", str(len(data)))
+        # 代码类资源（页面/脚本/样式）强制每次校验，避免改了前端却跑旧缓存；
+        # 图片/字体等静态资产照常缓存，省得每次刷新都重下。
+        if ext in (".html", ".htm", ".js", ".css"):
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        else:
+            self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
         self.wfile.write(data)
 
