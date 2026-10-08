@@ -175,6 +175,47 @@ export default {
           <div id="wTestOut" class="note" style="margin-top:8px"></div>
         </div>
 
+        <div class="panel" id="lanPanel">
+          <h3>局域网访问 · 多设备互联</h3>
+          <div class="note" style="margin-bottom:10px">
+            把工作台开给同网段的手机 / 平板 / 另一台电脑：文件索引、资料库、待办日历
+            在别的设备上也能用，往后互传文件、OpenClaw 干完活直接送打印机，都从这个口进来。<br>
+            <b>代价得说清楚</b>：工作台能读写本机文件、还能开交互终端，所以只要对局域网开放，
+            <b>就必须有访问口令</b>。本机 <code>127.0.0.1</code> 免口令，自己用不打扰。<br>
+            <b class="warn">别在公共 WiFi（宿舍楼 / 咖啡厅 / 图书馆）下开这个开关。</b>
+          </div>
+
+          <div class="field-row" style="margin-bottom:6px">
+            <label style="min-width:74px">绑定地址</label>
+            <select id="lanBind" style="min-width:230px">
+              <option value="127.0.0.1">127.0.0.1 —— 只本机（最安全）</option>
+              <option value="0.0.0.0">0.0.0.0 —— 对局域网开放</option>
+            </select>
+            <label style="margin-left:10px">局域网访问</label>
+            <input type="checkbox" id="lanAllow" style="width:auto">
+          </div>
+          <div id="lanState" class="note"></div>
+
+          <div class="we-step">访问口令</div>
+          <div class="we-cb">
+            <div class="we-cbrow">
+              <code id="lanToken">—</code>
+              <button class="btn" id="btnLanEye" style="height:26px;padding:0 9px;font-size:11px">显示</button>
+              <button class="btn" id="btnLanCopy" style="height:26px;padding:0 9px;font-size:11px">复制</button>
+              <button class="btn" id="btnLanNew" style="height:26px;padding:0 9px;font-size:11px">换一个</button>
+            </div>
+          </div>
+
+          <div class="we-step">在别的设备上打开</div>
+          <div id="lanUrls"></div>
+
+          <div class="field-row" style="margin-top:10px">
+            <button class="btn primary" id="btnLanSave">保存</button>
+            <button class="btn" id="btnLanOff">一键关掉局域网</button>
+          </div>
+          <div id="lanOut" class="note" style="margin-top:8px"></div>
+        </div>
+
         <div class="panel">
           <h3>备份</h3>
           <div class="note" style="margin-bottom:10px">
@@ -260,6 +301,7 @@ export default {
     this.loadConns();
     this.loadConnLog();
     this.loadWecom();
+    this.loadLan();
 
     el.querySelector('#cType').addEventListener('change', () => this.renderDyn());
     el.querySelector('#btnAddConn').addEventListener('click', () => this.saveConn());
@@ -282,6 +324,25 @@ export default {
     el.querySelector('#wTest').addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') this.wecomIngest();
     });
+
+    el.querySelector('#btnLanSave').addEventListener('click', () => this.saveLan());
+    el.querySelector('#btnLanNew').addEventListener('click', () => this.lanNewToken());
+    el.querySelector('#btnLanOff').addEventListener('click', () => this.lanOff());
+    el.querySelector('#btnLanEye').addEventListener('click', () => {
+      const c = this.el.querySelector('#lanToken');
+      this._lanShow = !this._lanShow;
+      c.textContent = this._lanShow ? (this._lanTok || '—')
+                                    : (this._lanTok ? this.maskKey(this._lanTok) : '—');
+      this.el.querySelector('#btnLanEye').textContent = this._lanShow ? '隐藏' : '显示';
+    });
+    el.querySelector('#btnLanCopy').addEventListener('click', async () => {
+      if (!this._lanTok) { toast('还没生成口令'); return; }
+      try {
+        await navigator.clipboard.writeText(this._lanTok);
+        toast('口令已复制');
+      } catch (e) { toast('复制失败，点「显示」手动抄一下吧'); }
+    });
+    el.querySelector('#lanAllow').addEventListener('change', () => this.saveLan(true));
 
     el.querySelector('#btnModReset').addEventListener('click', async () => {
       if (!confirm('恢复默认：所有开关、顺序、改名全部还原。继续？')) return;
@@ -600,6 +661,110 @@ export default {
     };
   },
 
+  // ---- 局域网访问（多设备互联）----
+
+  maskKey(t) {
+    const s = String(t || '');
+    if (!s) return '—';
+    if (s.length <= 10) return s.slice(0, 2) + '••••';
+    return s.slice(0, 4) + '••••••••••' + s.slice(-4);
+  },
+
+  async loadLan() {
+    const panel = this.el.querySelector('#lanPanel');
+    if (!panel) return;
+    const d = await api('/api/remote/status');
+    if (!d || d.ok === false) {
+      // 这些接口只有主机能读；在别的设备上打开设置页会走到这里，如实说清楚
+      this.el.querySelector('#lanState').textContent =
+        (d && d.error) ? d.error : '读不到局域网配置（只能在主机上改）';
+      this.el.querySelector('#lanUrls').innerHTML = '';
+      this.el.querySelector('#btnLanSave').disabled = true;
+      this.el.querySelector('#btnLanNew').disabled = true;
+      this.el.querySelector('#btnLanOff').disabled = true;
+      return;
+    }
+    this._lan = d;
+    this._lanTok = d.token || '';
+    this._lanShow = false;
+    const bind = this.el.querySelector('#lanBind');
+    if (document.activeElement !== bind) bind.value = d.bind || '127.0.0.1';
+    this.el.querySelector('#lanAllow').checked = !!d.allow_lan;
+    this.el.querySelector('#lanToken').textContent =
+      this._lanTok ? this.maskKey(this._lanTok) : '—（还没生成）';
+    this.el.querySelector('#btnLanEye').textContent = '显示';
+
+    const st = this.el.querySelector('#lanState');
+    if (!d.bound_open) {
+      st.innerHTML = '当前<b>只监听本机</b>。想用手机连，把绑定地址改成 <code>0.0.0.0</code> 再保存，'
+        + '然后<b>重启工作台</b>（双击 start.bat）才真的生效。';
+    } else if (d.allow_lan && d.token_set) {
+      st.innerHTML = `已对局域网开放，监听 <code>${esc(d.bind)}:${d.port}</code>。`
+        + '外来设备必须有口令才能进。';
+    } else {
+      st.innerHTML = '<b class="warn">绑到了局域网地址，但访问是关着的</b>'
+        + '（或还没有口令）——外来请求一律拒绝。';
+    }
+    if (d.restart_needed) {
+      st.innerHTML += '<br><b class="warn">配置里的绑定地址和当前实际监听的不一致，重启后才生效。</b>';
+    }
+    this.renderLanUrls(d);
+  },
+
+  renderLanUrls(d) {
+    const box = this.el.querySelector('#lanUrls');
+    if (!box) return;
+    const urls = d.urls || [];
+    const bare = d.urls_bare || [];
+    if (!urls.length) {
+      box.innerHTML = '<div class="note">没探到局域网地址 —— 可能没接网线 / 没连 WiFi，或者网络还没起来。</div>';
+      return;
+    }
+    box.innerHTML = urls.map((u) => `
+      <div class="we-cbrow" style="margin-bottom:6px">
+        <code>${esc(u)}</code>
+        <button class="btn" data-lan-url="${esc(u)}"
+          style="height:26px;padding:0 9px;font-size:11px">复制</button>
+      </div>`).join('')
+      + `<div class="note" style="font-size:12px">链接里带了口令，发到手机点一次就记住；
+         之后直接开 <code>${esc(bare[0] || '')}</code> 也行。</div>`;
+    box.querySelectorAll('[data-lan-url]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(b.getAttribute('data-lan-url'));
+          toast('链接已复制');
+        } catch (e) { toast('复制失败，手动选一下吧'); }
+      });
+    });
+  },
+
+  async saveLan(quiet) {
+    const body = {
+      bind: this.el.querySelector('#lanBind').value,
+      allow_lan: this.el.querySelector('#lanAllow').checked,
+    };
+    const r = await post('/api/remote/save', body);
+    if (!r || r.ok === false) { toast((r && r.error) || '保存失败'); return; }
+    if (r.generated) {
+      toast('已开局域网，顺手生成了一个访问口令');
+    } else if (!quiet) {
+      toast(r.restart_needed ? '已保存，重启工作台后生效' : '已保存');
+    }
+    this.loadLan();
+  },
+
+  async lanNewToken() {
+    if (!confirm('换口令后，其他设备上的旧链接会失效，需要重新解锁。继续？')) return;
+    const r = await post('/api/remote/token', {});
+    if (r && r.ok) { toast('口令已更换'); this.loadLan(); }
+  },
+
+  async lanOff() {
+    if (!confirm('关掉局域网访问并清空口令？之后只有本机能打开工作台。')) return;
+    const r = await post('/api/remote/clear', {});
+    if (r && r.ok) { toast('已关闭局域网访问'); this.loadLan(); }
+  },
+
   async loadWecom() {
     const panel = this.el.querySelector('#wecomPanel');
     if (!panel) return;
@@ -839,6 +1004,7 @@ export default {
     this.loadConns();
     this.loadConnLog();
     this.loadWecom();
+    this.loadLan();
   },
 
   commands() {

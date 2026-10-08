@@ -28,6 +28,14 @@ async function api(path, opts) {
   }
   if (CS && CS.active() && !CS.canServe(path)) { const lo = CS.localOnlyApi(path); if (lo) return lo; }
   const r = await fetch(path, opts);
+  if (r.status === 401) {
+    // 局域网访问口令失效 / 这台设备没解锁：明说，别让界面装作没事继续转圈
+    if (!window.__wbNoKey) {
+      window.__wbNoKey = 1;
+      toast('访问口令失效了 —— 用带 ?k= 的链接重新打开一次');
+    }
+    return { rows: [], ok: false, unauthorized: true };
+  }
   return r.json();
 }
 

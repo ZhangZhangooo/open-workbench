@@ -1,17 +1,22 @@
 """OpenWorkbench — 本地服务端。
 
-零第三方依赖，全部用 Python 标准库。服务只监听 127.0.0.1，不对外暴露。
+零第三方依赖，全部用 Python 标准库。默认只监听 127.0.0.1；
+想给同网段的手机/平板/另一台电脑用，就在设置里把绑定改成 0.0.0.0——
+**但那样必须同时设访问口令**，因为工作台能读写本机文件、还能开交互终端。
 """
 
 from __future__ import annotations
 
 import base64
 import calendar
+import hashlib
+import hmac
 import io
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -118,6 +123,15 @@ DEFAULT_CONFIG = {
         "egress_ip": "",         # 上次见到的公网出口 IP，变了就提醒去更新可信IP
     },
     "scan_roots": ["C:\\", "D:\\", "E:\\"],
+    # 局域网访问（多设备互联）：把工作台开给同网段的手机 / 平板 / 另一台电脑。
+    # ⚠️ 工作台能读写本机文件、还能开交互终端，所以一旦绑到非回环地址，
+    #    非本机请求必须要口令 —— 口令为空 = 一律拒绝，不给自己留敞口的机会。
+    #    本机 127.0.0.1 照旧免口令，自己用不被打扰。
+    "remote": {
+        "bind": "127.0.0.1",   # 想给别的设备用就改成 0.0.0.0（改完要重启）
+        "token": "",           # 局域网访问口令；空 = 非本机一律拒绝
+        "allow_lan": True,     # 总开关，不用重启就能生效的「急停」
+    },
 }
 
 GRAPH_SCOPES = "User.Read Mail.Read Calendars.Read Tasks.Read offline_access"
@@ -158,6 +172,114 @@ IDX = indexer.Indexer(DB_PATH)
 STORE = store.Store()
 
 DAY = lambda: time.strftime("%Y-%m-%d")  # noqa: E731
+
+# ---------------- 局域网访问：绑定 + 口令 ----------------
+
+LOOPBACK_IPS = ("127.0.0.1", "::1", "localhost")
+
+# 这几类接口无论怎么配都只认本机：远程开 shell 等于把整台机器交出去，
+# 神经桥是「让 OpenClaw 替本机干活」的入口，也不该从局域网进来；
+# /api/remote 会回访问口令本身，更只能在主机上看。
+LOCAL_ONLY_PREFIX = ("/api/term", "/api/bridge", "/api/remote")
+
+# 企业微信回调是腾讯服务器发过来的，没有 cookie 也不该有，签名校验在它自己的路由里做
+LAN_GATE_EXEMPT = ("/wecom/callback",)
+
+
+def remote_cfg() -> dict:
+    """局域网配置，永远补齐到完整字段（老 config.json 里没有 remote 也能用）。"""
+    r = CFG.get("remote")
+    if not isinstance(r, dict):
+        r = {}
+        CFG["remote"] = r
+    d = DEFAULT_CONFIG["remote"]
+    r["bind"] = str(r.get("bind") or d["bind"])
+    r["token"] = str(r.get("token") or "")
+    if "allow_lan" not in r:
+        r["allow_lan"] = d["allow_lan"]
+    r["allow_lan"] = bool(r["allow_lan"])
+    return r
+
+
+def lan_ips() -> list[str]:
+    """本机可能被同网段访问到的 IPv4（去掉回环）。"""
+    out: list[str] = []
+    s = None
+    try:
+        # 连一个不可路由地址，只为让内核挑出默认出口网卡；不真发包
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            out.append(ip)
+    except OSError:
+        pass
+    finally:
+        if s:
+            try:
+                s.close()
+            except OSError:
+                pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in out:
+                out.append(ip)
+    except OSError:
+        pass
+    return out
+
+
+def new_remote_token() -> str:
+    """访问口令：24 字节随机，urlsafe base64，去掉 = 和容易看混的字符。"""
+    raw = base64.urlsafe_b64encode(os.urandom(18)).decode("ascii").rstrip("=")
+    return raw.replace("-", "x").replace("_", "y")
+
+
+def lan_urls(port: int, with_key: bool = True) -> list[str]:
+    """给别的设备用的完整地址。带 ?k= 的链接点一次就种下 cookie，之后免输。"""
+    tok = remote_cfg().get("token") or ""
+    tail = ("/?k=" + tok) if (with_key and tok) else "/"
+    return [f"http://{ip}:{port}{tail}" for ip in lan_ips()]
+
+
+def _now_bound_open() -> bool:
+    b = str(remote_cfg().get("bind") or "")
+    return b not in ("", "127.0.0.1", "::1", "localhost")
+
+
+# 未解锁时给别的设备看的页面。纯内联、不引外部资源（静态目录也是要口令的），
+# 表单直接 GET 回 /?k=xxx，复用同一条「换 cookie 并抹掉地址栏」的路。
+_UNLOCK_HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>需要访问口令 · OpenWorkbench</title>
+<style>
+:root{color-scheme:dark light}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:#11131a;color:#e8eaf2;font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+@media (prefers-color-scheme:light){body{background:#f6f7fb;color:#1b1d24}}
+.box{width:min(430px,92vw);padding:28px 26px;border-radius:14px;
+background:rgba(127,127,127,.10);border:1px solid rgba(127,127,127,.22)}
+h1{margin:0 0 6px;font-size:18px}
+p{margin:0 0 18px;opacity:.75;font-size:13.5px}
+input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:9px;font-size:14px;
+border:1px solid rgba(127,127,127,.35);background:transparent;color:inherit}
+button{margin-top:12px;width:100%;padding:10px;border:0;border-radius:9px;font-size:14px;
+background:#4f7cff;color:#fff;cursor:pointer}
+.why{margin-top:16px;font-size:12.5px;opacity:.6;word-break:break-all}
+</style></head><body>
+<form class="box" method="get" action="/">
+<h1>需要访问口令</h1>
+<p>OpenWorkbench 已开放给局域网。输入访问口令解锁这台设备；
+口令在主机上「设置 → 局域网访问」里看（本机 127.0.0.1 不用输）。</p>
+<input name="k" placeholder="访问口令" autocomplete="off" autofocus>
+<button type="submit">解锁</button>
+<div class="why">__WHY__</div>
+</form>
+</body></html>
+"""
+
 
 MAIL_ATT = os.path.join(DATA, "mail_att")
 MAIL_TLS_FIELDS = ("user", "password", "imap_host", "imap_port", "smtp_host",
@@ -775,6 +897,7 @@ def wecom_ingest(fields: dict) -> dict:
 TUNNEL_STATE: dict = {"proc": None, "url": "", "status": "stopped",
                       "started_at": 0.0, "log": []}
 SERVER_PORT = 8777
+BOUND_HOST = "127.0.0.1"      # 实际绑上去的地址，main() 里会改；用于判断「改了 bind 要不要重启」
 _TUNNEL_URL_RE = re.compile(r"https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com")
 
 
@@ -2094,11 +2217,82 @@ class Handler(BaseHTTPRequestHandler):
                 results.append({"path": path, "ok": False, "error": str(e)})
         return {"ok": True, "action": action, "results": results}
 
+    # ---- 局域网口令闸 ----
+
+    def _is_local(self) -> bool:
+        return self.client_address[0] in LOOPBACK_IPS
+
+    def _cookie(self, name: str = "wb_key") -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return ""
+
+    def _lan_gate(self, p: str) -> bool:
+        """非本机请求的门禁。放行 → True；已拦下并回过响应 → False。
+
+        本机（127.0.0.1）永远放行 —— 口令是给局域网加的，不是给自己加的。
+        """
+        self._wb_grant = False
+        local = self._is_local()
+        if p.startswith(LOCAL_ONLY_PREFIX):
+            if not local:
+                self._json({"ok": False, "error": "这个接口只允许本机调用"}, 403)
+                return False
+            return True
+        if local or p.startswith(LAN_GATE_EXEMPT):
+            return True
+        r = remote_cfg()
+        if not r["allow_lan"]:
+            self._deny("局域网访问已被关掉（主机上 设置 → 局域网访问）")
+            return False
+        want = r["token"]
+        if not want:
+            self._deny("主机还没设访问口令，为安全起见局域网一律拒绝")
+            return False
+        got = (parse_qs(urlparse(self.path).query).get("k") or [""])[0]
+        if got and hmac.compare_digest(got, want):
+            self._wb_grant = True          # 用 ?k= 进来的，下面种 cookie 并抹掉地址栏
+            return True
+        if hmac.compare_digest(self._cookie(), want):
+            return True
+        self._deny("访问口令不对，或者这台设备还没解锁")
+        return False
+
+    def _deny(self, why: str):
+        """接口给 JSON 让前端老实降级；页面给一个能输口令的小表单。"""
+        if urlparse(self.path).path.startswith("/api/"):
+            self._json({"ok": False, "error": why, "unauthorized": True}, 401)
+            return
+        self._text(_UNLOCK_HTML.replace("__WHY__", why),
+                   "text/html; charset=utf-8", code=401)
+
+    def _grant_cookie(self) -> bool:
+        """刚才是靠 ?k= 过的闸：种下 cookie，再 302 到干净地址，别让口令留在地址栏。"""
+        if not getattr(self, "_wb_grant", False):
+            return False
+        if urlparse(self.path).path not in ("/", "/index.html"):
+            return False
+        self.send_response(302)
+        self.send_header("Set-Cookie",
+                         "wb_key=" + remote_cfg()["token"]
+                         + "; Path=/; Max-Age=31536000; SameSite=Lax; HttpOnly")
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        return True
+
     # routes
 
     def do_GET(self):
         u = urlparse(self.path)
         p = u.path
+
+        if not self._lan_gate(p):
+            return
+        if self._grant_cookie():
+            return
 
         if p in ("/", "/index.html"):
             self._static("index.html")
@@ -2145,6 +2339,28 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/sysinfo":
             self._json(sysinfo_snapshot())
+            return
+
+        # ---- 局域网访问：状态（只认本机，见 LOCAL_ONLY_PREFIX）----
+        if p == "/api/remote/status":
+            r = remote_cfg()
+            self._json({
+                "ok": True,
+                "bind": r["bind"],
+                "allow_lan": r["allow_lan"],
+                "token": r["token"],
+                "token_set": bool(r["token"]),
+                "bound_open": _now_bound_open(),
+                # 从哪来的：自己排查「手机为什么连不上 / 为什么没被拦」时有用
+                "client_ip": self.client_address[0],
+                # bind 改了要重启才真的生效，这里如实告诉前端
+                "restart_needed": r["bind"] != BOUND_HOST,
+                "port": SERVER_PORT,
+                "local_url": f"http://127.0.0.1:{SERVER_PORT}",
+                "ips": lan_ips(),
+                "urls": lan_urls(SERVER_PORT),
+                "urls_bare": lan_urls(SERVER_PORT, with_key=False),
+            })
             return
 
         # ---- 企业微信：回调入口必须放在最前面，它不走 JSON ----
@@ -2960,6 +3176,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         p = u.path
+
+        # 企业微信回调是腾讯的服务器打过来的（没有 cookie，也不该有），
+        # 它自带签名校验，必须先放过去 —— 所以闸放在它后面判断。
+        if not p.startswith(LAN_GATE_EXEMPT) and not self._lan_gate(p):
+            return
 
         # 110 上传测速：只量客户端送上来多少字节，不落盘
         if p == "/api/speedtest/upload":
@@ -3970,6 +4191,45 @@ class Handler(BaseHTTPRequestHandler):
             self._json(tunnel_start(int(body.get("port") or 0)))
             return
 
+        # ---- 局域网访问：改绑定 / 重发口令（只认本机，见 LOCAL_ONLY_PREFIX）----
+        if p == "/api/remote/save":
+            r = remote_cfg()
+            if "bind" in body:
+                b = str(body.get("bind") or "").strip()
+                if b not in ("127.0.0.1", "0.0.0.0", "::", "::1"):
+                    self._json({"ok": False, "error": "绑定地址只支持 127.0.0.1 或 0.0.0.0"})
+                    return
+                r["bind"] = b
+            if "allow_lan" in body:
+                r["allow_lan"] = bool(body.get("allow_lan"))
+            # 放开到局域网却没口令 = 等于没锁门，这里直接替他补一把
+            generated = ""
+            if _now_bound_open() and r["allow_lan"] and not r["token"]:
+                r["token"] = new_remote_token()
+                generated = r["token"]
+            save_config(CFG)
+            self._json({"ok": True, "bind": r["bind"], "allow_lan": r["allow_lan"],
+                        "token": r["token"], "generated": generated,
+                        "restart_needed": r["bind"] != BOUND_HOST})
+            return
+
+        if p == "/api/remote/token":
+            r = remote_cfg()
+            r["token"] = str(body.get("token") or "").strip() or new_remote_token()
+            save_config(CFG)
+            STORE.log_add("warn", "局域网访问口令已更换，其他设备需要重新解锁", "server")
+            self._json({"ok": True, "token": r["token"]})
+            return
+
+        if p == "/api/remote/clear":
+            r = remote_cfg()
+            r["token"] = ""
+            r["allow_lan"] = False
+            save_config(CFG)
+            STORE.log_add("warn", "已关闭局域网访问并清空口令", "server")
+            self._json({"ok": True})
+            return
+
         if p == "/api/wecom/tunnel/stop":
             self._json(tunnel_stop())
             return
@@ -4900,27 +5160,61 @@ def _kb_retrieve(q: str, rows: list[dict], top: int = 5, cap: int = 12_000) -> l
 
 
 def main():
-    global SERVER_PORT
+    global SERVER_PORT, BOUND_HOST
     port = 8777
-    host = (CFG.get("remote") or {}).get("bind") or "127.0.0.1"
+    host = remote_cfg()["bind"] or "127.0.0.1"
     argv = sys.argv[1:]
     if argv and argv[0].isdigit():
         port = int(argv[0])
     if "--host" in argv:
         host = argv[argv.index("--host") + 1]
     SERVER_PORT = port
+    BOUND_HOST = host
+    open_bind = host not in ("127.0.0.1", "::1", "localhost")
+
+    # 一旦绑到非回环地址，就必须有口令 —— 否则等于把整台机器（含交互终端）
+    # 交给同网段所有人。这里不靠人记得去设，直接自动补一把。
+    r = remote_cfg()
+    token_generated = ""
+    if open_bind and not r["token"]:
+        r["token"] = new_remote_token()
+        token_generated = r["token"]
+        try:
+            save_config(CFG)
+        except OSError:
+            pass
+    if token_generated:
+        try:
+            STORE.log_add("warn", "绑定了非回环地址，已自动生成局域网访问口令", "server")
+        except Exception:  # noqa: BLE001
+            pass
+
     srv = ThreadingHTTPServer((host, port), Handler)
     # 69 定时发送的看门人在后台，到点就把排队的邮件发出去
     threading.Thread(target=_mail_loop, daemon=True).start()
     # 企业微信：出口 IP 变了要提醒（家宽动态 IP 一变，发消息就报 60020）
     if wecom_cfg().get("enabled"):
         threading.Thread(target=_wecom_egress_watch, daemon=True).start()
+
+    urls = [f"http://127.0.0.1:{port}"]
+    if open_bind:
+        urls += lan_urls(port)
     # 114 启动留痕，日志页一眼能看到这次是几点起的
     try:
-        STORE.log_add("info", f"工作台已启动：http://{host}:{port}", "server")
+        STORE.log_add("info", f"工作台已启动：{'  '.join(urls)}", "server")
     except Exception:  # noqa: BLE001
         pass
-    print(f"工作台已启动： http://{host}:{port}")
+
+    print("工作台已启动：")
+    for u in urls:
+        print(f"  {u}")
+    if open_bind:
+        if r["allow_lan"] and r["token"]:
+            print("[!] 已对局域网开放。上面带 ?k= 的链接发给手机/平板即可，点一次就免输。")
+            print("[!] 同网段的人拿到口令就能读写本机文件——别在公共 WiFi 下开。")
+        else:
+            print("[!] 绑到了局域网地址，但局域网访问是关着的（或没口令），外来请求一律拒绝。")
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -2535,5 +2535,12 @@ body.light ::-webkit-scrollbar-thumb {
   background: var(--surface-2); border-radius: 7px; word-break: break-all;
   color: var(--ink); user-select: all;
 }
+/* 局域网面板里的警示句：红一点，别让人一扫而过 */
+.warn { color: #ff6b6b; font-weight: 600; }
+:root[data-theme="light"] .warn,
+body.light .warn { color: #d92d20; }
+#lanPanel.lan-locked { opacity: .78; }
+#lanPanel .field-row { align-items: center; }
+#lanUrls .we-cbrow code { min-width: 0; }
 
 
