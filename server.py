@@ -131,6 +131,9 @@ DEFAULT_CONFIG = {
         "bind": "127.0.0.1",   # 想给别的设备用就改成 0.0.0.0（改完要重启）
         "token": "",           # 局域网访问口令；空 = 非本机一律拒绝
         "allow_lan": True,     # 总开关，不用重启就能生效的「急停」
+        # gate = False 时彻底不设防：不验口令，连终端 / 桥接这类
+        # LOCAL_ONLY 接口也一并开放。只在完全可信的自家网络里这么用。
+        "gate": True,
     },
 }
 
@@ -198,6 +201,9 @@ def remote_cfg() -> dict:
     if "allow_lan" not in r:
         r["allow_lan"] = d["allow_lan"]
     r["allow_lan"] = bool(r["allow_lan"])
+    if "gate" not in r:
+        r["gate"] = d["gate"]
+    r["gate"] = bool(r["gate"])
     return r
 
 
@@ -2235,6 +2241,9 @@ class Handler(BaseHTTPRequestHandler):
         本机（127.0.0.1）永远放行 —— 口令是给局域网加的，不是给自己加的。
         """
         self._wb_grant = False
+        if not remote_cfg()["gate"]:
+            # 关闸模式：不验口令，连 LOCAL_ONLY 的终端 / 桥接接口也一起放开
+            return True
         local = self._is_local()
         if p.startswith(LOCAL_ONLY_PREFIX):
             if not local:
@@ -2348,6 +2357,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "bind": r["bind"],
                 "allow_lan": r["allow_lan"],
+                "gate": r["gate"],
                 "token": r["token"],
                 "token_set": bool(r["token"]),
                 "bound_open": _now_bound_open(),
@@ -4202,14 +4212,17 @@ class Handler(BaseHTTPRequestHandler):
                 r["bind"] = b
             if "allow_lan" in body:
                 r["allow_lan"] = bool(body.get("allow_lan"))
-            # 放开到局域网却没口令 = 等于没锁门，这里直接替他补一把
+            if "gate" in body:
+                r["gate"] = bool(body.get("gate"))
+            # 放开到局域网却没口令 = 等于没锁门，这里直接替他补一把。
+            # 但用户明确关了闸（gate=False）就别自作主张塞口令。
             generated = ""
-            if _now_bound_open() and r["allow_lan"] and not r["token"]:
+            if r["gate"] and _now_bound_open() and r["allow_lan"] and not r["token"]:
                 r["token"] = new_remote_token()
                 generated = r["token"]
             save_config(CFG)
             self._json({"ok": True, "bind": r["bind"], "allow_lan": r["allow_lan"],
-                        "token": r["token"], "generated": generated,
+                        "gate": r["gate"], "token": r["token"], "generated": generated,
                         "restart_needed": r["bind"] != BOUND_HOST})
             return
 
@@ -5172,11 +5185,11 @@ def main():
     BOUND_HOST = host
     open_bind = host not in ("127.0.0.1", "::1", "localhost")
 
-    # 一旦绑到非回环地址，就必须有口令 —— 否则等于把整台机器（含交互终端）
-    # 交给同网段所有人。这里不靠人记得去设，直接自动补一把。
+    # 一旦绑到非回环地址就必须有口令 —— 除非用户明确关了闸（gate=False），
+    # 那是他知情之后的选择，就别再硬塞一把了。
     r = remote_cfg()
     token_generated = ""
-    if open_bind and not r["token"]:
+    if r["gate"] and open_bind and not r["token"]:
         r["token"] = new_remote_token()
         token_generated = r["token"]
         try:
@@ -5198,7 +5211,8 @@ def main():
 
     urls = [f"http://127.0.0.1:{port}"]
     if open_bind:
-        urls += lan_urls(port)
+        # 关闸模式下不带 ?k=（没口令可带），给干净地址
+        urls += lan_urls(port, with_key=r["gate"])
     # 114 启动留痕，日志页一眼能看到这次是几点起的
     try:
         STORE.log_add("info", f"工作台已启动：{'  '.join(urls)}", "server")
@@ -5209,7 +5223,10 @@ def main():
     for u in urls:
         print(f"  {u}")
     if open_bind:
-        if r["allow_lan"] and r["token"]:
+        if not r["gate"]:
+            print("[!] 关闸模式：同网段任何设备都能直接进，终端 / 桥接接口也开放。")
+            print("[!] 只在完全可信的自家网络里这么用，别在公共 WiFi 下开。")
+        elif r["allow_lan"] and r["token"]:
             print("[!] 已对局域网开放。上面带 ?k= 的链接发给手机/平板即可，点一次就免输。")
             print("[!] 同网段的人拿到口令就能读写本机文件——别在公共 WiFi 下开。")
         else:

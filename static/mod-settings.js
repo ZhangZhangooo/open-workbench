@@ -179,10 +179,11 @@ export default {
           <h3>局域网访问 · 多设备互联</h3>
           <div class="note" style="margin-bottom:10px">
             把工作台开给同网段的手机 / 平板 / 另一台电脑：文件索引、资料库、待办日历
-            在别的设备上也能用，往后互传文件、OpenClaw 干完活直接送打印机，都从这个口进来。<br>
-            <b>代价得说清楚</b>：工作台能读写本机文件、还能开交互终端，所以只要对局域网开放，
-            <b>就必须有访问口令</b>。本机 <code>127.0.0.1</code> 免口令，自己用不打扰。<br>
-            <b class="warn">别在公共 WiFi（宿舍楼 / 咖啡厅 / 图书馆）下开这个开关。</b>
+            在别的设备上也能用，互传文件、OpenClaw 干完活直接送打印机，都从这个口进来。<br>
+            两种模式：<b>口令闸</b>（默认，别的设备头一次进来要输一次口令）／
+            <b>关闸</b>（自家网络专用，谁进来都用，连终端接口也一并开放）。<br>
+            本机 <code>127.0.0.1</code> 两种模式下都免口令。<br>
+            <b class="warn">不管哪种模式，都别在公共 WiFi（宿舍楼 / 咖啡厅 / 图书馆）下绑 0.0.0.0。</b>
           </div>
 
           <div class="field-row" style="margin-bottom:6px">
@@ -193,11 +194,13 @@ export default {
             </select>
             <label style="margin-left:10px">局域网访问</label>
             <input type="checkbox" id="lanAllow" style="width:auto">
+            <label style="margin-left:14px">关闸（不设口令）</label>
+            <input type="checkbox" id="lanGate" style="width:auto">
           </div>
           <div id="lanState" class="note"></div>
 
           <div class="we-step">访问口令</div>
-          <div class="we-cb">
+          <div class="we-cb" id="lanTokenBox">
             <div class="we-cbrow">
               <code id="lanToken">—</code>
               <button class="btn" id="btnLanEye" style="height:26px;padding:0 9px;font-size:11px">显示</button>
@@ -343,6 +346,7 @@ export default {
       } catch (e) { toast('复制失败，点「显示」手动抄一下吧'); }
     });
     el.querySelector('#lanAllow').addEventListener('change', () => this.saveLan(true));
+    el.querySelector('#lanGate').addEventListener('change', () => this.saveLan(true));
 
     el.querySelector('#btnModReset').addEventListener('click', async () => {
       if (!confirm('恢复默认：所有开关、顺序、改名全部还原。继续？')) return;
@@ -690,6 +694,10 @@ export default {
     const bind = this.el.querySelector('#lanBind');
     if (document.activeElement !== bind) bind.value = d.bind || '127.0.0.1';
     this.el.querySelector('#lanAllow').checked = !!d.allow_lan;
+    const noGate = d.gate === false;
+    this.el.querySelector('#lanGate').checked = noGate;
+    const tbox = this.el.querySelector('#lanTokenBox');
+    if (tbox) tbox.style.display = noGate ? 'none' : '';
     this.el.querySelector('#lanToken').textContent =
       this._lanTok ? this.maskKey(this._lanTok) : '—（还没生成）';
     this.el.querySelector('#btnLanEye').textContent = '显示';
@@ -698,6 +706,9 @@ export default {
     if (!d.bound_open) {
       st.innerHTML = '当前<b>只监听本机</b>。想用手机连，把绑定地址改成 <code>0.0.0.0</code> 再保存，'
         + '然后<b>重启工作台</b>（双击 start.bat）才真的生效。';
+    } else if (!d.gate) {
+      st.innerHTML = `<b class="warn">关闸模式</b>：监听 <code>${esc(d.bind)}:${d.port}</code>，`
+        + '同网段任何设备直接就能进，<b>连终端接口也开放</b> —— 只在自家网络里这么用。';
     } else if (d.allow_lan && d.token_set) {
       st.innerHTML = `已对局域网开放，监听 <code>${esc(d.bind)}:${d.port}</code>。`
         + '外来设备必须有口令才能进。';
@@ -726,8 +737,11 @@ export default {
         <button class="btn" data-lan-url="${esc(u)}"
           style="height:26px;padding:0 9px;font-size:11px">复制</button>
       </div>`).join('')
-      + `<div class="note" style="font-size:12px">链接里带了口令，发到手机点一次就记住；
-         之后直接开 <code>${esc(bare[0] || '')}</code> 也行。</div>`;
+      + (d.gate === false
+        ? `<div class="note" style="font-size:12px">关闸模式：链接不带口令，
+           手机直接开 <code>${esc(bare[0] || '')}</code> 就能进。</div>`
+        : `<div class="note" style="font-size:12px">链接里带了口令，发到手机点一次就记住；
+           之后直接开 <code>${esc(bare[0] || '')}</code> 也行。</div>`);
     box.querySelectorAll('[data-lan-url]').forEach((b) => {
       b.addEventListener('click', async () => {
         try {
@@ -742,6 +756,7 @@ export default {
     const body = {
       bind: this.el.querySelector('#lanBind').value,
       allow_lan: this.el.querySelector('#lanAllow').checked,
+      gate: !this.el.querySelector('#lanGate').checked,
     };
     const r = await post('/api/remote/save', body);
     if (!r || r.ok === false) { toast((r && r.error) || '保存失败'); return; }
