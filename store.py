@@ -453,6 +453,13 @@ ALTERS = [
     "ALTER TABLE clip ADD COLUMN pinned INTEGER DEFAULT 0",
 ]
 
+# 老库回填：早期 ALTER 加的列有的没写 DEFAULT（如 projects.created），老行会是 NULL。
+# NULL 混进 max()/比较里会直接抛 TypeError（项目页 500 的真实来因），这里幂等补上。
+BACKFILLS = [
+    "UPDATE projects SET created = COALESCE(updated, CAST(strftime('%s','now') AS REAL))"
+    " WHERE created IS NULL",
+]
+
 PROMPT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS prompts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -735,6 +742,11 @@ class Store:
                 self.conn.execute(sql)
             except sqlite3.OperationalError:
                 pass  # 列已存在
+        for sql in BACKFILLS:
+            try:
+                self.conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # 表/列还没有，跳过
         self.conn.commit()
 
     def _run(self, sql: str, args=(), fetch=True):
@@ -2223,7 +2235,9 @@ class Store:
     def _last_active(self, pid: int) -> float:
         """80 停滞预警：项目上最后一次有动静是什么时候。"""
         row = self.conn.execute("SELECT updated, created FROM projects WHERE id=?", (pid,)).fetchone()
-        cands = [row["updated"] if row else 0, row["created"] if row else 0]
+        cands: list = []
+        if row:
+            cands += [row["updated"], row["created"]]
         for sql in ("SELECT MAX(created) m FROM plog WHERE project_id=?",
                     "SELECT MAX(created) m FROM tasks WHERE project_id=?",
                     "SELECT MAX(done_at) m FROM tasks WHERE project_id=?",
@@ -2235,7 +2249,14 @@ class Store:
                     cands.append(v)
             except sqlite3.OperationalError:
                 pass
-        return float(max(cands) or 0)
+        # 任何一路取到 NULL / 空串 / 脏数据都跳过：直接 max() 会在 None 与 float 之间比较而抛 TypeError
+        nums: list[float] = []
+        for c in cands:
+            try:
+                nums.append(float(c))
+            except (TypeError, ValueError):
+                pass
+        return max(nums) if nums else 0.0
 
     def projects_board(self, stale_days: int | None = None) -> list[dict]:
         """项目卡片 + 任务进度 + 番茄分钟 + 里程碑完成度 + 停滞天数，一次给全。
@@ -3039,6 +3060,15 @@ class Store:
 
     def weight_stats(self) -> dict:
         rows = self._run("SELECT day, kg FROM weights ORDER BY day")   # 升序，给曲线
+        # 脏数据（kg 为 NULL / 非数字）一律剔掉，别让 min()/max() 撞上 None
+        clean = []
+        for r in rows:
+            try:
+                r["kg"] = float(r["kg"])
+            except (TypeError, ValueError):
+                continue
+            clean.append(r)
+        rows = clean
         if not rows:
             return {"ok": True, "n": 0, "series": []}
         first, last = rows[0], rows[-1]
