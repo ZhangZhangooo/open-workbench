@@ -236,6 +236,22 @@ def lan_ips() -> list[str]:
     return out
 
 
+def _port_serving(host: str, port: int) -> bool:
+    """这个端口上是不是已经有人在应答了 —— 抓「旧实例占着不放、新配置不生效」。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.6)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
 def new_remote_token() -> str:
     """访问口令：24 字节随机，urlsafe base64，去掉 = 和容易看混的字符。"""
     raw = base64.urlsafe_b64encode(os.urandom(18)).decode("ascii").rstrip("=")
@@ -5201,6 +5217,11 @@ def main():
             STORE.log_add("warn", "绑定了非回环地址，已自动生成局域网访问口令", "server")
         except Exception:  # noqa: BLE001
             pass
+
+    # 端口上已经有别的实例在应答？Windows 允许同端口双绑，不查出来就会「改了配置像没改」
+    if _port_serving("127.0.0.1", port):
+        print(f"[!] 注意：{port} 端口上已经有一个工作台在跑了（多半是上次没关的那个窗口）。")
+        print("    现在起的这个可能抢不到请求 —— 建议先把旧窗口关掉再来。")
 
     srv = ThreadingHTTPServer((host, port), Handler)
     # 69 定时发送的看门人在后台，到点就把排队的邮件发出去

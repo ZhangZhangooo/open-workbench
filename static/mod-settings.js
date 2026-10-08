@@ -199,13 +199,15 @@ export default {
           </div>
           <div id="lanState" class="note"></div>
 
-          <div class="we-step">访问口令</div>
-          <div class="we-cb" id="lanTokenBox">
-            <div class="we-cbrow">
-              <code id="lanToken">—</code>
-              <button class="btn" id="btnLanEye" style="height:26px;padding:0 9px;font-size:11px">显示</button>
-              <button class="btn" id="btnLanCopy" style="height:26px;padding:0 9px;font-size:11px">复制</button>
-              <button class="btn" id="btnLanNew" style="height:26px;padding:0 9px;font-size:11px">换一个</button>
+          <div id="lanTokenWrap">
+            <div class="we-step">访问口令</div>
+            <div class="we-cb" id="lanTokenBox">
+              <div class="we-cbrow">
+                <code id="lanToken">—</code>
+                <button class="btn" id="btnLanEye" style="height:26px;padding:0 9px;font-size:11px">显示</button>
+                <button class="btn" id="btnLanCopy" style="height:26px;padding:0 9px;font-size:11px">复制</button>
+                <button class="btn" id="btnLanNew" style="height:26px;padding:0 9px;font-size:11px">换一个</button>
+              </div>
             </div>
           </div>
 
@@ -696,7 +698,7 @@ export default {
     this.el.querySelector('#lanAllow').checked = !!d.allow_lan;
     const noGate = d.gate === false;
     this.el.querySelector('#lanGate').checked = noGate;
-    const tbox = this.el.querySelector('#lanTokenBox');
+    const tbox = this.el.querySelector('#lanTokenWrap');
     if (tbox) tbox.style.display = noGate ? 'none' : '';
     this.el.querySelector('#lanToken').textContent =
       this._lanTok ? this.maskKey(this._lanTok) : '—（还没生成）';

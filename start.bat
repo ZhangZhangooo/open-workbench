@@ -3,6 +3,10 @@ chcp 65001 >nul
 REM OpenWorkbench —— 双击即开（简易版，无崩溃自动重启；要更稳用 start_workbench.bat）。
 cd /d "%~dp0"
 
+REM 先把占着 8777 的旧实例清掉。Windows 的 SO_REUSEADDR 允许两个进程同绑一个端口，
+REM 不清的话新实例起不来、请求还被旧实例应答，改了配置就像没改一样。
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8777 " ^| findstr "LISTENING"') do taskkill /F /PID %%p >nul 2>nul
+
 set PYCMD=
 if exist "%~dp0.python-path" for /f "usebackq delims=" %%p in ("%~dp0.python-path") do set PYCMD="%%p"
 if not defined PYCMD ( where py >nul 2>nul && set PYCMD=py -3 )
