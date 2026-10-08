@@ -947,10 +947,176 @@ def smtp_send(c: dict, title: str, content: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ---------- 企业微信（WeCom）：第一个「双向」连接器 ----------
+# 前面那几种都是单向推送（工作台 → 你的手机）。
+# 企业微信自建应用 + 「微信插件」能双向：你在微信聊天框里发一句话，
+# 工作台收到、干活、再把结果发回同一个聊天框。体验上就是普通微信，
+# 但走的是官方合规通道，不碰逆向协议，不封号。
+
+WECOM_API = "https://qyapi.weixin.qq.com/cgi-bin"
+_WECOM_TOKEN: dict[str, dict] = {}   # ck -> {access_token, expire_at}
+
+
+def _wecom_get(url: str, timeout: int = 15) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "OpenWorkbench"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "ignore"))
+
+
+def _wecom_post(url: str, payload: dict, timeout: int = 15) -> dict:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "OpenWorkbench"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "ignore"))
+
+
+def _wecom_err(o: dict, prefix: str) -> str:
+    """把企业微信的 errcode 翻成人话。60020 是新用户必踩的坑，单独说清楚。"""
+    code = o.get("errcode")
+    msg = o.get("errmsg") or ""
+    if code == 60020:
+        return (f"{prefix}：本机公网 IP 不在「企业可信IP」白名单里。"
+                "去 企业微信后台 → 应用管理 → 你的自建应用 → 企业可信IP，把本机公网 IP 填进去。")
+    if code == 40013:
+        return f"{prefix}：CorpID 不对（在企业微信后台「我的企业」页最下面）。"
+    if code == 40001:
+        return f"{prefix}：Secret 不对 —— 要用「自建应用」的 Secret，别拿通讯录同步那个。"
+    if code == 82001:
+        return f"{prefix}：接收人不在这个应用的可见范围内，去后台把成员加进「可见范围」。"
+    if code == 81013:
+        return f"{prefix}：接收人不对 —— 这里要填企业微信里的 UserID（登录后台通讯录能看到），不是手机号或姓名。"
+    if code == 40056:
+        return f"{prefix}：AgentID 不对（自建应用详情页那个数字）。"
+    return f"{prefix}：errcode={code} {msg}"
+
+
+def wecom_get_token(corpid: str, secret: str, force: bool = False) -> dict:
+    """拿 access_token。缓存到快过期前 5 分钟，避免卡在边界上被拒。"""
+    corpid = (corpid or "").strip()
+    secret = (secret or "").strip()
+    if not corpid or not secret:
+        return {"ok": False, "error": "企业微信没填全（CorpID / Secret 都要）"}
+    ck = corpid + "|" + secret[-8:]
+    now = time.time()
+    hit = _WECOM_TOKEN.get(ck)
+    if not force and hit and hit.get("expire_at", 0) > now + 60:
+        return {"ok": True, "access_token": hit["access_token"],
+                "expires_in": int(hit["expire_at"] - now), "cached": True}
+    try:
+        o = _wecom_get(f"{WECOM_API}/gettoken?corpid={urllib.parse.quote(corpid)}"
+                       f"&corpsecret={urllib.parse.quote(secret)}")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"连企业微信服务器失败：{e}"}
+    if o.get("errcode") != 0 or not o.get("access_token"):
+        return {"ok": False, "error": _wecom_err(o, "获取 access_token 失败")}
+    exp = int(o.get("expires_in") or 7200)
+    _WECOM_TOKEN[ck] = {"access_token": o["access_token"],
+                        "expire_at": now + max(60, exp - 300)}
+    return {"ok": True, "access_token": o["access_token"], "expires_in": exp,
+            "cached": False}
+
+
+def wecom_send(c: dict, title: str, content: str, msgtype: str = "") -> dict:
+    """主动发消息给成员（应用消息）。c 里要 corpid/secret/agentid/touser。"""
+    agentid = str(c.get("agentid") or "").strip()
+    if not agentid:
+        return {"ok": False, "error": "没填 AgentID"}
+    touser = (c.get("touser") or "@all").strip() or "@all"
+    t = wecom_get_token(c.get("corpid"), c.get("secret"))
+    if not t.get("ok"):
+        return t
+
+    mt = (msgtype or c.get("msgtype") or "text").lower()
+    if mt not in ("text", "markdown"):
+        mt = "text"
+    body: dict = {
+        "touser": touser,
+        "msgtype": mt,
+        "agentid": int(agentid) if agentid.lstrip("-").isdigit() else agentid,
+    }
+    if mt == "markdown":
+        body["markdown"] = {"content": (f"**{title}**\n\n{content}" if title else content)[:4000]}
+    else:
+        body["text"] = {"content": (f"{title}\n{content}" if title else (content or ""))[:2000]}
+
+    def _do(tok: str) -> dict:
+        return _wecom_post(f"{WECOM_API}/message/send?access_token={urllib.parse.quote(tok)}", body)
+
+    try:
+        o = _do(t["access_token"])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"发送请求失败：{e}"}
+    if o.get("errcode") == 0:
+        return {"ok": True, "msg": f"已发到 {touser}", "msgid": o.get("msgid", "")}
+    if o.get("errcode") in (40014, 42001):      # token 失效 -> 强刷一次再试
+        t2 = wecom_get_token(c.get("corpid"), c.get("secret"), force=True)
+        if t2.get("ok"):
+            try:
+                o = _do(t2["access_token"])
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"重试发送失败：{e}"}
+            if o.get("errcode") == 0:
+                return {"ok": True, "msg": f"已发到 {touser}（刷新 token 后成功）",
+                        "msgid": o.get("msgid", "")}
+    return {"ok": False, "error": _wecom_err(o, "发送失败")}
+
+
+_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+def egress_ip(timeout: int = 8) -> dict:
+    """本机公网出口 IP。「企业可信IP」要填的就是它。
+
+    家庭宽带是动态 IP，重启光猫/隔天就可能变，所以这个值要存下来做对比提醒。
+    """
+    sources = [
+        ("https://myip.ipip.net", lambda b: (_IP_RE.search(b).group(1) if _IP_RE.search(b) else "")),
+        ("https://api.ipify.org", lambda b: b.strip()),
+        ("https://ifconfig.me/ip", lambda b: b.strip()),
+    ]
+    for url, pick in sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                b = r.read().decode("utf-8", "ignore")
+            ip = (pick(b) or "").strip()
+            if _IP_RE.fullmatch(ip):
+                return {"ok": True, "ip": ip, "via": url}
+        except Exception:  # noqa: BLE001
+            continue
+    return {"ok": False, "error": "拿不到公网出口 IP（可能是没网，或这几个查 IP 的站点都连不上）"}
+
+
+def wecom_selfcheck(c: dict) -> dict:
+    """三步连通性自检：出口 IP -> 拿 token -> 真发一条。"""
+    steps: list[dict] = []
+    ip = egress_ip()
+    steps.append({"name": "查公网出口 IP", "ok": bool(ip.get("ok")),
+                  "detail": ip.get("ip") or ip.get("error") or ""})
+    t = wecom_get_token(c.get("corpid"), c.get("secret"))
+    steps.append({"name": "换取 access_token", "ok": bool(t.get("ok")),
+                  "detail": "已拿到" if t.get("ok")
+                            else (t.get("error") or "")})
+    if t.get("ok"):
+        r = wecom_send(c, "工作台自检", "你在微信里看到这条，就说明工作台能主动找你了。", "text")
+        steps.append({"name": "试发一条应用消息", "ok": bool(r.get("ok")),
+                      "detail": r.get("msg") or r.get("error") or ""})
+    else:
+        steps.append({"name": "试发一条应用消息", "ok": False, "detail": "上一步没过，跳过"})
+    return {"ok": all(s["ok"] for s in steps), "steps": steps,
+            "egress_ip": ip.get("ip") or ""}
+
+
 def connector_push(connector: dict, title: str, content: str) -> dict:
     """按连接器类型分发推送。新增类型在这里加 case 即可。"""
     ctype = (connector.get("type") or "").lower()
     token = connector.get("token") or ""
+    if ctype in ("wecom", "qywx", "企业微信"):
+        return wecom_send(connector, title, content)
     if ctype in ("pushplus", "push", "pushplus+", "wechat"):
         return pushplus_send(token, title, content, connector.get("topic", ""))
     if ctype in ("serverchan", "sc", "server酱"):

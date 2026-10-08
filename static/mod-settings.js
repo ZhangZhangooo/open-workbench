@@ -87,6 +87,7 @@ export default {
               <select id="cType" style="height:34px">
                 <option value="pushplus">PushPlus（微信服务号）</option>
                 <option value="serverchan">Server酱（微信）</option>
+                <option value="wecom">企业微信（双向，可收可发）</option>
                 <option value="webhook">Webhook（自定义 URL）</option>
                 <option value="smtp">SMTP 邮件</option>
               </select>
@@ -97,6 +98,81 @@ export default {
             <button class="btn" id="btnCancelEdit" style="display:none">取消编辑</button>
           </div>
           <div id="connLog" style="margin-top:10px"></div>
+        </div>
+
+        <div class="panel" id="wecomPanel">
+          <h3>企业微信 · 在微信里指挥工作台</h3>
+          <div class="note" style="margin-bottom:10px">
+            普通微信没有官方的消息接口，硬接会封号。这里走官方合规的路子：
+            <b>企业微信自建应用 + 我的企业→微信插件</b>。个人微信扫一下插件二维码之后，
+            收发消息都在你自己的微信聊天框里 —— 体验跟普通微信一样，但能双向：
+            你说一句，工作台干活，结果发回同一个框。<br>
+            <b>同一个手机号就行</b>，不用第二个微信号，也不用营业执照。
+          </div>
+
+          <details class="we-fold">
+            <summary>① 先在企业微信后台把应用建好（一次性，约 5 分钟）</summary>
+            <ol class="we-ol">
+              <li>用手机号注册企业微信（个人也能注册，<b>不需要营业执照</b>），然后进管理后台。</li>
+              <li>「我的企业 → 企业信息」抄下 <b>企业ID</b>。</li>
+              <li>「应用管理 → 自建 → 创建应用」→ 记下 <b>AgentId</b> 和 <b>Secret</b>
+                  （Secret 只在创建时完整露一次，没抄到可以进 App 的「应用」里再看）。</li>
+              <li>「我的企业 → 微信插件」生成二维码，<b>用你自己的个人微信扫</b>。</li>
+              <li>插件页里那句「仅在企业微信中接收消息」<b>一定要取消勾选</b>，否则微信里收不到。
+                  会话/应用消息的接收开关同理，都关掉「仅企业微信内」。</li>
+            </ol>
+          </details>
+
+          <div class="we-step">② 把凭据填进来</div>
+          <div class="we-grid">
+            <div class="field"><label>企业ID（CorpID）</label><input id="wCorp" placeholder="ww 开头的那串"></div>
+            <div class="field"><label>应用 Secret</label><input id="wSecret" placeholder="留空 = 不动已存的"></div>
+            <div class="field"><label>AgentId</label><input id="wAgent" placeholder="纯数字"></div>
+            <div class="field"><label>默认接收人</label><input id="wToUser" placeholder="企业微信 UserID，留空 = @all"></div>
+            <div class="field"><label>Token</label><input id="wToken" placeholder="接收消息用，点下面随机生成"></div>
+            <div class="field"><label>EncodingAESKey</label><input id="wAes" placeholder="43 位，点下面随机生成"></div>
+          </div>
+          <div class="field-row" style="margin-top:8px">
+            <button class="btn" id="btnWGen">随机生成 Token + AESKey</button>
+            <button class="btn primary" id="btnWSave">保存</button>
+            <button class="btn" id="btnWCheck">连通性自检</button>
+          </div>
+          <div id="wInfo" class="note" style="margin-top:8px"></div>
+
+          <div class="we-step">③ 让微信能找到你这台电脑</div>
+          <div class="note" style="margin-bottom:8px">
+            企业微信要给你发消息，就得能从公网访问到本机。家里宽带一般没有公网 IP，
+            所以用 cloudflared 的临时隧道：本机主动连出去，换回一个 https 地址。
+            不用改路由器、不用买服务器、不用备案。<b>代价是地址临时，重启就变</b>，
+            变了要回后台改一次回调 URL。<br>
+            另外：家庭宽带是动态 IP，本机公网 IP 一变，企业微信就会拒收（报 60020），
+            所以 IP 也要填进后台的「企业可信IP」，工作台发现 IP 变了会在日志里提醒你。
+          </div>
+          <div class="field-row">
+            <button class="btn" id="btnWTun">开隧道</button>
+            <button class="btn" id="btnWTunStop">关隧道</button>
+            <span id="wTunState" class="note"></span>
+          </div>
+          <div class="we-cb">
+            <div class="note" style="font-size:12px;margin-bottom:4px">
+              把下面这个地址填到 企业微信后台 → 应用 → 接收消息 → 设置API接收：
+            </div>
+            <div class="we-cbrow">
+              <code id="wCallback">（开隧道后自动生成）</code>
+              <button class="btn" id="btnWCopy" style="height:26px;padding:0 9px;font-size:11px">复制</button>
+            </div>
+            <div class="note" style="font-size:12px;margin-top:4px">
+              URL、Token、EncodingAESKey 三样都要跟上面填的一致 —— 后台点「保存」时，
+              企业微信会来敲一下工作台验签，对不上会直接报错。
+            </div>
+          </div>
+
+          <div class="we-step">④ 测一下</div>
+          <div class="field-row">
+            <input id="wTest" placeholder="输入一句话，比如：今日" style="flex:1;min-width:180px">
+            <button class="btn" id="btnWIngest">模拟发一条</button>
+          </div>
+          <div id="wTestOut" class="note" style="margin-top:8px"></div>
         </div>
 
         <div class="panel">
@@ -183,10 +259,29 @@ export default {
     this.loadMods();
     this.loadConns();
     this.loadConnLog();
+    this.loadWecom();
 
     el.querySelector('#cType').addEventListener('change', () => this.renderDyn());
     el.querySelector('#btnAddConn').addEventListener('click', () => this.saveConn());
     el.querySelector('#btnCancelEdit').addEventListener('click', () => this.editConn(null));
+
+    el.querySelector('#btnWGen').addEventListener('click', () => this.genWecomKey());
+    el.querySelector('#btnWSave').addEventListener('click', () => this.saveWecom());
+    el.querySelector('#btnWCheck').addEventListener('click', () => this.wecomCheck());
+    el.querySelector('#btnWTun').addEventListener('click', () => this.tunnelToggle(true));
+    el.querySelector('#btnWTunStop').addEventListener('click', () => this.tunnelToggle(false));
+    el.querySelector('#btnWIngest').addEventListener('click', () => this.wecomIngest());
+    el.querySelector('#btnWCopy').addEventListener('click', async () => {
+      const t = this.el.querySelector('#wCallback').textContent || '';
+      if (!t || t.indexOf('（') === 0) { toast('还没生成回调地址'); return; }
+      try {
+        await navigator.clipboard.writeText(t);
+        toast('已复制');
+      } catch (e) { toast('复制失败，手动选一下吧'); }
+    });
+    el.querySelector('#wTest').addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') this.wecomIngest();
+    });
 
     el.querySelector('#btnModReset').addEventListener('click', async () => {
       if (!confirm('恢复默认：所有开关、顺序、改名全部还原。继续？')) return;
@@ -326,6 +421,16 @@ export default {
         + f('授权码', 'cPass', v('pass'), '邮箱设置里生成的授权码')
         + f('发给', 'cTo', v('to'), '收件邮箱，默认发给自己');
     }
+    if (t === 'wecom') {
+      return '<div class="note" style="font-size:12px;margin:4px 0 8px">'
+        + '企业微信双向通道的完整配置（回调地址 / 隧道 / 自检 / 模拟消息）在上面的'
+        + '「企业微信 · 在微信里指挥工作台」面板里。这里填完就是一条能推的通道。</div>'
+        + f('企业ID（CorpID）', 'cCorp', v('corpid'), 'ww 开头')
+        + f('应用 Secret', 'cSecret', v('secret'), '自建应用的 Secret')
+        + f('AgentId', 'cAgent', v('agentid'), '纯数字')
+        + f('接收人', 'cToUser', v('touser'), 'UserID，留空 = @all')
+        + f('消息格式', 'cMsgType', v('msgtype', 'text'), 'text 或 markdown');
+    }
     return '';
   },
 
@@ -340,6 +445,12 @@ export default {
     if (type === 'smtp') {
       return { host: g('cHost'), port: g('cPort') || '465', user: g('cUser'), pass: g('cPass'), to: g('cTo') };
     }
+    if (type === 'wecom') {
+      return {
+        corpid: g('cCorp'), secret: g('cSecret'), agentid: g('cAgent'),
+        touser: g('cToUser') || '@all', msgtype: g('cMsgType') || 'text',
+      };
+    }
     return {};
   },
 
@@ -350,6 +461,10 @@ export default {
     }
     if (t === 'webhook') return (c.url || '').slice(0, 46) || '无 URL';
     if (t === 'smtp') return (c.user || '未配') + (c.to ? ' → ' + c.to : '');
+    if (t === 'wecom') {
+      const base = c.corpid ? c.corpid.slice(0, 6) + '…' : '没填 CorpID';
+      return base + (c.agentid ? ' · AgentId ' + c.agentid : '') + ' → ' + (c.touser || '@all');
+    }
     return '';
   },
 
@@ -363,6 +478,10 @@ export default {
       if (!vals.url) { toast('先填 URL'); return; }
     } else if (type === 'smtp') {
       if (!vals.host || !vals.user || !vals.pass) { toast('SMTP 三样填全：服务器 / 账号 / 授权码'); return; }
+    } else if (type === 'wecom') {
+      if (!vals.corpid || !vals.secret || !vals.agentid) {
+        toast('企业微信三样填全：CorpID / Secret / AgentId'); return;
+      }
     }
     const cons = (await api('/api/connectors')).rows || [];
     if (this._editing) {
@@ -468,6 +587,137 @@ export default {
           <span style="margin-left:auto;color:var(--ink-3)">${esc(window.WB.fmtTime(r.ts))}</span>
           ${r.error ? `<div style="width:100%;color:var(--err,#c0392b);font-size:11px">${esc(String(r.error).slice(0, 120))}</div>` : ''}
         </div>`).join('');
+  },
+
+  /* ---- 企业微信双向通道：配好之后在微信聊天框里指挥工作台 ---- */
+
+  wecomGrab() {
+    const g = (id) => ((this.el.querySelector('#' + id) || {}).value || '').trim();
+    return {
+      corpid: g('wCorp'), agentid: g('wAgent'),
+      touser: g('wToUser') || '@all',
+      token: g('wToken'), aes_key: g('wAes'), secret: g('wSecret'),
+    };
+  },
+
+  async loadWecom() {
+    const panel = this.el.querySelector('#wecomPanel');
+    if (!panel) return;
+    const d = await api('/api/wecom/status');
+    this._wecom = d || {};
+    // 正在打字的框不要覆盖，否则用户输入会被回填冲掉
+    const set = (id, v) => {
+      const n = this.el.querySelector('#' + id);
+      if (n && document.activeElement !== n) n.value = v == null ? '' : String(v);
+    };
+    set('wCorp', d.corpid);
+    set('wAgent', d.agentid);
+    set('wToUser', d.touser === '@all' ? '' : d.touser);
+    set('wToken', d.token);
+    set('wAes', d.aes_key);
+
+    this.showCallback(d.callback_url);
+    const st = this.el.querySelector('#wTunState');
+    if (st) {
+      st.textContent = d.tunnel_status === 'running'
+        ? '隧道在跑'
+        : (d.tunnel_status === 'starting' ? '隧道启动中…'
+          : (d.tunnel_installed ? '隧道没开' : '本机没装 cloudflared'));
+    }
+    const info = this.el.querySelector('#wInfo');
+    if (info && !info.dataset.keep) {
+      const ready = [];
+      if (d.ready_recv) ready.push('收消息已配好');
+      if (d.ready_send) ready.push('发消息已配好');
+      info.textContent = (ready.length ? '✅ ' + ready.join(' · ') : '还没配全。') +
+        (d.egress_ip ? '　本机公网 IP：' + d.egress_ip : '');
+    }
+  },
+
+  showCallback(url) {
+    const n = this.el.querySelector('#wCallback');
+    if (n) n.textContent = url || '（开隧道后自动生成）';
+  },
+
+  async saveWecom() {
+    const v = this.wecomGrab();
+    const body = {
+      enabled: true, corpid: v.corpid, agentid: v.agentid, touser: v.touser,
+      token: v.token, aes_key: v.aes_key,
+    };
+    if (v.secret) body.secret = v.secret;     // 留空 = 不动已经存着的 Secret
+    const r = await post('/api/wecom/save', body);
+    this.el.querySelector('#wSecret').value = '';
+    toast(r && r.ok ? '已保存' : '保存失败');
+    this.loadWecom();
+  },
+
+  async genWecomKey() {
+    const d = await post('/api/wecom/genkey', {});
+    if (!d || !d.ok) { toast('生成失败'); return; }
+    this.el.querySelector('#wToken').value = d.token;
+    this.el.querySelector('#wAes').value = d.aes_key;
+    toast('生成了。记得点保存，再把这两串抄进企业微信后台');
+  },
+
+  async wecomCheck() {
+    const box = this.el.querySelector('#wInfo');
+    if (box) { box.dataset.keep = '1'; box.textContent = '自检中…（最后一步会真发一条消息到你微信）'; }
+    const d = await post('/api/wecom/selfcheck', {});
+    const lines = (d.steps || []).map((s) =>
+      (s.ok ? '✅ ' : '❌ ') + esc(s.name) + '：' + esc(s.detail || ''));
+    if (d.egress_ip) lines.push('本机公网出口 IP：' + esc(d.egress_ip) + '（要填进后台的「企业可信IP」）');
+    if (box) box.innerHTML = lines.join('<br>') || '自检没返回结果';
+    toast(d.ok ? '全通了' : '有没过的，按提示改');
+  },
+
+  async tunnelToggle(start) {
+    const st = this.el.querySelector('#wTunState');
+    if (st) st.textContent = start ? '正在拉隧道…' : '正在关…';
+    const d = await post(start ? '/api/wecom/tunnel/start' : '/api/wecom/tunnel/stop', {});
+    if (!d.ok) {
+      if (st) st.textContent = '没起来';
+      toast(d.error ? String(d.error).slice(0, 160) : '操作失败');
+      return;
+    }
+    if (!start) { if (st) st.textContent = '隧道已关'; this.loadWecom(); return; }
+    this.pollTunnel();
+  },
+
+  async pollTunnel(tries = 16) {
+    const st = this.el.querySelector('#wTunState');
+    for (let i = 0; i < tries; i++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const d = await api('/api/wecom/status');
+      if (d.tunnel_url) {
+        this.showCallback(d.callback_url);
+        this._wecom = d;
+        if (st) st.textContent = '隧道通了';
+        toast('隧道通了，把回调地址填进企业微信后台');
+        return;
+      }
+      if (d.tunnel_status === 'stopped') {
+        if (st) st.textContent = '隧道退出了';
+        const tail = (d.tunnel_log || []).slice(-3).join('　');
+        if (tail) toast('cloudflared 报错：' + tail.slice(-140));
+        return;
+      }
+      if (st) st.textContent = '隧道启动中…' + Math.round((i + 1) * 1.5) + 's';
+    }
+    if (st) st.textContent = '还没出地址，可能是网络问题';
+  },
+
+  async wecomIngest() {
+    const t = (this.el.querySelector('#wTest').value || '').trim();
+    if (!t) { toast('先写一句想说的话'); return; }
+    const out = this.el.querySelector('#wTestOut');
+    out.textContent = '处理中…';
+    const to = (this._wecom && this._wecom.touser && this._wecom.touser !== '@all')
+      ? this._wecom.touser : '';
+    const d = await post('/api/wecom/ingest', { Content: t, FromUserName: to });
+    out.innerHTML = d.sync
+      ? '内置命令就地答复：<br>' + esc(d.reply || '')
+      : '不是内置命令，已经丢给 OpenClaw 在后台跑，结果会发到你的微信。';
   },
 
   async loadOcrModels() {
@@ -588,6 +838,7 @@ export default {
     this.loadMods();
     this.loadConns();
     this.loadConnLog();
+    this.loadWecom();
   },
 
   commands() {

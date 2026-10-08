@@ -26,6 +26,19 @@
   },
   "scan_roots": ["C:\\", "D:\\", "E:\\"],
   "connectors": [],
+  "wecom": {
+    "enabled": false,
+    "corpid": "",
+    "secret": "",
+    "agentid": "",
+    "touser": "@all",
+    "token": "",
+    "aes_key": "",
+    "msgtype": "text",
+    "tunnel": "",
+    "callback_url": "",
+    "egress_ip": ""
+  },
   "remote": {
     "access_key": "",
     "cors": "",

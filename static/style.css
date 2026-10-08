@@ -2509,4 +2509,31 @@ body.light ::-webkit-scrollbar-thumb {
 .sk-rec b { font-size: 12.5px; font-weight: 500; }
 .sk-recwhy { font-size: 11px; margin-top: 2px; }
 
+/* ---- 企业微信双向通道：设置面板 ---- */
+.we-fold {
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px;
+  background: var(--surface-2); margin-bottom: 12px;
+}
+.we-fold summary {
+  cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--ink-2);
+  outline: none; list-style: none;
+}
+.we-fold summary::-webkit-details-marker { display: none; }
+.we-fold summary::before { content: '▸ '; color: var(--accent); }
+.we-fold[open] summary::before { content: '▾ '; }
+.we-ol { margin: 8px 0 2px 18px; padding: 0; font-size: 12px; color: var(--ink-2); line-height: 1.75; }
+.we-ol li { margin-bottom: 2px; }
+.we-step {
+  font-size: 12.5px; font-weight: 500; color: var(--ink-2);
+  margin: 14px 0 8px; padding-left: 9px; border-left: 3px solid var(--accent);
+}
+.we-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0 12px; }
+.we-cb { margin-top: 10px; padding: 9px 11px; border: 1px dashed var(--line); border-radius: 10px; }
+.we-cbrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.we-cbrow code {
+  flex: 1; min-width: 200px; font-size: 12px; padding: 5px 9px;
+  background: var(--surface-2); border-radius: 7px; word-break: break-all;
+  color: var(--ink); user-select: all;
+}
+
 

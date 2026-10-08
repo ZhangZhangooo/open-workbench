@@ -33,6 +33,7 @@ import integrations  # noqa: E402
 import sysinfo  # noqa: E402
 import docsio  # noqa: E402
 import conpty  # noqa: E402
+import wecom as wecommod  # noqa: E402
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -100,6 +101,22 @@ DEFAULT_CONFIG = {
     # 这样所有老代码（MailClient(CFG["mail"])）一行都不用改。
     "mail_accounts": [],         # [{id,name,user,password,imap_host,imap_port,smtp_host,smtp_port,smtp_tls}]
     "mail_active": "",           # 当前启用账号的 id（空 = 用上面那份 mail）
+    # 企业微信双向通道：自建应用 + 「微信插件」，在微信聊天框里指挥工作台。
+    # 收消息只要 Token/EncodingAESKey；发消息额外要 CorpID/Secret/AgentID，
+    # 且本机公网 IP 必须在后台的「企业可信IP」白名单里（否则 60020）。
+    "wecom": {
+        "enabled": False,
+        "corpid": "",            # 我的企业 -> 企业ID
+        "secret": "",            # 自建应用 -> Secret
+        "agentid": "",           # 自建应用 -> AgentId
+        "touser": "@all",        # 默认接收人（企业微信 UserID，@all 表示应用可见范围内所有人）
+        "token": "",             # 接收消息 -> Token
+        "aes_key": "",           # 接收消息 -> EncodingAESKey
+        "msgtype": "text",       # 主动发消息用 text / markdown
+        "tunnel": "",            # cloudflared 拿到的 https://xxx.trycloudflare.com
+        "callback_url": "",      # 拼好的完整回调地址，方便直接粘到后台
+        "egress_ip": "",         # 上次见到的公网出口 IP，变了就提醒去更新可信IP
+    },
     "scan_roots": ["C:\\", "D:\\", "E:\\"],
 }
 
@@ -401,8 +418,17 @@ _REM_PUSH_LAST = {"ts": 0.0, "n": 0, "conn": 0}
 
 
 def _enabled_connectors() -> list[dict]:
-    return [c for c in (CFG.get("connectors") or [])
-            if c.get("enabled", True) and (c.get("token") or c.get("url"))]
+    """启用中的连接器。企业微信没有 token/url（它靠 secret），单独放行。"""
+    out = []
+    for c in (CFG.get("connectors") or []):
+        if not c.get("enabled", True):
+            continue
+        ctype = (c.get("type") or "").lower()
+        if c.get("token") or c.get("url"):
+            out.append(c)
+        elif ctype in ("wecom", "qywx", "企业微信") and c.get("secret"):
+            out.append(c)
+    return out
 
 
 def _push_all(title: str, content: str) -> dict:
@@ -424,6 +450,456 @@ def _push_all(title: str, content: str) -> dict:
             except Exception:  # noqa: BLE001
                 pass
     return {"ok": True, "n": len(conns), "sent": sent}
+
+
+# ================= 企业微信双向通道 =================
+# 前面那些连接器（pushplus / serverchan / webhook / smtp）都是单向的：
+# 工作台推给你，你没法回话。这里是第一个双向的 ——
+# 你在（普通）微信的聊天框里发一句话，工作台收到、干活、把结果发回同一个框。
+#
+# 走的通道是「企业微信群机器人」不行（只能群内、单向），所以用的是
+# 「企业微信自建应用 + 我的企业→微信插件」：个人微信扫一下插件二维码，
+# 之后收发消息都在你自己的微信里，体验跟普通微信没区别，且官方合规、不封号。
+#
+# 两个硬性前提，代码里该提示的都提示了：
+#   1. 收消息只要 Token + EncodingAESKey；
+#   2. 发消息要 CorpID + Secret + AgentID，且本机公网 IP 必须在后台
+#      「企业可信IP」白名单里 —— 家宽是动态 IP，所以这里存了上次的出口 IP 做对比提醒。
+
+_WECOM_SEEN: dict[str, float] = {}      # MsgId -> 时间，企业微信收不到响应会重推，靠它去重
+_WECOM_LOCK = threading.Lock()
+
+
+def wecom_cfg() -> dict:
+    c = CFG.get("wecom")
+    if not isinstance(c, dict):
+        c = json.loads(json.dumps(DEFAULT_CONFIG["wecom"]))
+        CFG["wecom"] = c
+    for k, v in DEFAULT_CONFIG["wecom"].items():
+        c.setdefault(k, v)
+    return c
+
+
+def _wecom_callback_url() -> str:
+    """拼给企业微信后台填的回调地址。"""
+    c = wecom_cfg()
+    manual = (c.get("callback_url") or "").strip()
+    if manual:
+        return manual
+    base = (c.get("tunnel") or "").strip().rstrip("/")
+    return f"{base}/wecom/callback" if base else ""
+
+
+def _wecom_send_to(user: str, content: str, title: str = "") -> dict:
+    """主动发一条给成员。user 为空就退回配置里的默认接收人。"""
+    c = dict(wecom_cfg())
+    if user:
+        c["touser"] = user
+    return integrations.wecom_send(c, title, content, c.get("msgtype") or "text")
+
+
+def _wecom_dedup(msgid: str, window: float = 300.0) -> bool:
+    """True = 这条是重推的，跳过。企业微信 5 秒收不到响应就会重试。"""
+    if not msgid:
+        return False
+    now = time.time()
+    with _WECOM_LOCK:
+        for k, ts in list(_WECOM_SEEN.items()):
+            if now - ts > window:
+                _WECOM_SEEN.pop(k, None)
+        if msgid in _WECOM_SEEN:
+            return True
+        _WECOM_SEEN[msgid] = now
+        return False
+
+
+_WECOM_HELP = """我在，说人话就行。
+
+  帮助            看这份说明
+  状态            工作台现在什么样
+  今日            今天还有哪些事没做完
+  记 买牛奶        攒进收件箱（零碎念头先存下）
+  待办 交电费      直接进今天的事
+  收件箱          看攒了什么
+  账 32 吃饭       记一笔支出
+  账 收入 500 稿费  记一笔收入
+  搜 报销单        全盘找文件（46 万份里找）
+
+其它任何话，原样交给本机 OpenClaw 去干，干完把结果发回这个聊天框。"""
+
+
+_LEDGER_LEAD = ("账", "记账", "记帐", "流水", "记一笔")
+_LEDGER_OUT = ("支出", "支", "花", "花了", "用了", "买了")
+_LEDGER_IN = ("收入", "收", "入", "进账", "赚了")
+
+
+def _wecom_parse_ledger(s: str):
+    """'账 32 吃饭 和同事' -> (支出, 32.0, '吃饭', '和同事')
+
+    前缀分三层剥：先剥「账 / 记账」这类动词，再看第二个词是不是「收入/支出」。
+    """
+    parts = (s or "").split()
+    if parts and parts[0] in _LEDGER_LEAD:
+        parts = parts[1:]
+    if not parts:
+        return None
+    kind = "支出"
+    if parts[0] in _LEDGER_IN:
+        kind, parts = "收入", parts[1:]
+    elif parts[0] in _LEDGER_OUT:
+        kind, parts = "支出", parts[1:]
+    if not parts:
+        return None
+    m = re.search(r"-?\d+(?:\.\d+)?", parts[0])
+    if not m:
+        return None
+    try:
+        amt = float(m.group(0))
+    except ValueError:
+        return None
+    rest = parts[1:]
+    cat = rest[0] if rest else ""
+    note = " ".join(rest[1:]) if len(rest) > 1 else ""
+    return kind, amt, cat, note
+
+
+def _wecom_try_command(text: str, user: str = "") -> dict | None:
+    """内置命令优先。返回 None 表示「这不是命令」，交给 OpenClaw。"""
+    t = (text or "").strip()
+    if not t:
+        return {"text": _WECOM_HELP}
+    low = t.lower()
+
+    if low in ("帮助", "help", "?", "？", "菜单", "能干啥", "能做什么"):
+        return {"text": _WECOM_HELP}
+
+    if low in ("状态", "status", "工作台"):
+        try:
+            cnt = STORE.counts()
+            ip = wecom_cfg().get("egress_ip") or "未知"
+            return {"text": (
+                f"工作台在跑。\n"
+                f"文件索引 {cnt.get('inbox', 0) and ''}{IDX.count()} 份\n"
+                f"收件箱 {cnt.get('inbox', 0)} 条 / 今日未完成 {cnt.get('today_undone', 0)} 条\n"
+                f"公网出口 IP {ip}"
+            )}
+        except Exception as e:  # noqa: BLE001
+            return {"text": f"查状态出错了：{e}"}
+
+    if low in ("今日", "今天", "today"):
+        try:
+            rows = STORE.today_list(DAY())
+            todo = [r for r in rows if not r.get("done")]
+            if not todo:
+                return {"text": f"{DAY()} 今天的事都干完了。"}
+            lines = [f"{i}. {r.get('text', '')}" for i, r in enumerate(todo[:20], 1)]
+            more = f"\n…还有 {len(todo) - 20} 条" if len(todo) > 20 else ""
+            return {"text": f"今天还剩 {len(todo)} 件事：\n" + "\n".join(lines) + more}
+        except Exception as e:  # noqa: BLE001
+            return {"text": f"读今日清单出错：{e}"}
+
+    if low in ("收件箱", "inbox", "待办列表"):
+        try:
+            rows = [r for r in STORE.inbox_list(200) if not r.get("done")]
+            if not rows:
+                return {"text": "收件箱是空的。"}
+            lines = [f"{i}. {r.get('text', '')}" for i, r in enumerate(rows[:20], 1)]
+            return {"text": f"收件箱 {len(rows)} 条：\n" + "\n".join(lines)}
+        except Exception as e:  # noqa: BLE001
+            return {"text": f"读收件箱出错：{e}"}
+
+    m = re.match(r"^(?:记一下|记|备忘|memo|存一下)\s*[:：]?\s*(.+)$", t, re.I)
+    if m and m.group(1).strip():
+        try:
+            STORE.inbox_add(m.group(1).strip())
+            return {"text": f"收进收件箱了：{m.group(1).strip()}"}
+        except Exception as e:  # noqa: BLE001
+            return {"text": f"没记上：{e}"}
+
+    m = re.match(r"^(?:待办|todo)\s*[:：]?\s*(.+)$", t, re.I)
+    if m and m.group(1).strip():
+        try:
+            STORE.today_add(DAY(), m.group(1).strip())
+            return {"text": f"加进今天了：{m.group(1).strip()}"}
+        except Exception as e:  # noqa: BLE001
+            return {"text": f"没加上：{e}"}
+
+    m = re.match(r"^(?:搜|找|文件|find|search)\s*[:：]?\s*(.+)$", t, re.I)
+    if m and m.group(1).strip():
+        kw = m.group(1).strip()
+        try:
+            rows, total = IDX.search(kw, "", None, 6, 0)
+            if not rows:
+                return {"text": f"全盘没找到「{kw}」。"}
+            lines = []
+            for r in rows:
+                lines.append(f"· {r.get('name', '')}\n  {r.get('path', '')}")
+            more = f"\n（共 {total} 个匹配，先给前 6 个）" if total > len(rows) else ""
+            return {"text": f"「{kw}」找到这些：\n" + "\n".join(lines) + more}
+        except Exception as e:  # noqa: BLE001
+            return {"text": f"搜的时候出错：{e}"}
+
+    m = re.match(r"^(?:账|记账|花了|收入)\s*[:：]?\s*(.+)$", t, re.I)
+    if m:
+        parsed = _wecom_parse_ledger(t)
+        if parsed:
+            kind, amt, cat, note = parsed
+            try:
+                r = STORE.ledger_add(DAY(), kind, amt, cat, note)
+                if not r.get("ok"):
+                    return {"text": f"没记上：{r.get('error')}"}
+                tail = ""
+                over = r.get("over") or []
+                if over:
+                    tail = "\n⚠️ 这个月超支了：" + "、".join(
+                        f"{o.get('category')} 超 {o.get('over')}" for o in over[:5])
+                return {"text": f"记好了：{DAY()} {kind} ¥{amt:.2f}"
+                                + (f" · {cat}" if cat else "") + tail}
+            except Exception as e:  # noqa: BLE001
+                return {"text": f"记账出错：{e}"}
+    return None
+
+
+def _wecom_log(user: str, req: str, resp: str, ok: bool) -> None:
+    try:
+        STORE.log_add("info" if ok else "warn",
+                      f"[微信 {user or '-'}] {req[:80]} -> {(resp or '')[:200]}", "wecom")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _wecom_work(fields: dict) -> None:
+    """后台真正干活的地方。企业微信只等 5 秒，所以必须异步 + 主动发送。"""
+    user = (fields.get("FromUserName") or "").strip()
+    text = (fields.get("Content") or "").strip()
+    mtype = (fields.get("MsgType") or "").strip()
+
+    if mtype == "event":
+        ev = (fields.get("Event") or "").strip()
+        if ev in ("subscribe", "enter_agent"):
+            _wecom_send_to(user, _WECOM_HELP)
+        return
+    if mtype and mtype != "text":
+        _wecom_send_to(user, f"我只认得文字消息（这条是 {mtype}），语音图片暂时处理不了。")
+        return
+
+    fast = _wecom_try_command(text, user)
+    if fast is not None:
+        _wecom_send_to(user, fast["text"])
+        _wecom_log(user, text, fast["text"], True)
+        return
+
+    _wecom_send_to(user, f"收到，正在办：{text[:60]}\n（干完我把结果发回这个聊天框）")
+    t0 = time.time()
+    try:
+        ctx = _openclaw_ctx_parts()
+    except Exception:  # noqa: BLE001
+        ctx = ""
+    try:
+        r = _claw_run_with_retry(text, ctx, 300)
+    except Exception as e:  # noqa: BLE001
+        r = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    dur = round(time.time() - t0, 1)
+    out = (r.get("reply") or r.get("error") or "（它没给输出）").strip()
+    head = f"办完了，用了 {dur}s" if r.get("ok") else f"没办成（{dur}s）"
+    _wecom_send_to(user, f"{head}\n\n{out[:3500]}")
+    _wecom_log(user, text, out, bool(r.get("ok")))
+
+
+def wecom_handle_get(query: dict) -> tuple[int, str]:
+    """企业微信后台点「保存」时的 URL 校验：签名对得上就原样回 echostr。"""
+    cfg = wecom_cfg()
+    g = lambda k: (query.get(k) or [""])[0]  # noqa: E731
+    try:
+        c = wecommod.WeComCrypto(cfg.get("token"), cfg.get("aes_key"), cfg.get("corpid"))
+    except Exception as e:  # noqa: BLE001
+        return 500, f"企业微信配置不完整：{e}"
+    if c.verify_url(g("msg_signature"), g("timestamp"), g("nonce"), g("echostr")):
+        return 200, g("echostr")
+    return 403, "签名校验失败 —— Token 对不上，检查后台「接收消息」里的 Token 跟工作台填的是不是同一个"
+
+
+def wecom_handle_post(raw: bytes, query: dict) -> tuple[int, str]:
+    """收到微信消息。校验 -> 解密 -> 立刻回空串（5 秒限制）-> 后台干活。"""
+    cfg = wecom_cfg()
+    if not cfg.get("enabled", False):
+        return 200, ""
+    g = lambda k: (query.get(k) or [""])[0]  # noqa: E731
+    try:
+        c = wecommod.WeComCrypto(cfg.get("token"), cfg.get("aes_key"), cfg.get("corpid"))
+    except Exception as e:  # noqa: BLE001
+        try:
+            STORE.log_add("error", f"企业微信回调配置不完整：{e}", "wecom")
+        except Exception:  # noqa: BLE001
+            pass
+        return 200, ""
+    outer = wecommod.parse_xml(raw.decode("utf-8", "ignore"))
+    r = c.decrypt_message(g("msg_signature"), g("timestamp"), g("nonce"),
+                          outer.get("Encrypt") or "")
+    if not r.get("ok"):
+        try:
+            STORE.log_add("warn", f"企业微信回调被拒：{r.get('error')}", "wecom")
+        except Exception:  # noqa: BLE001
+            pass
+        return 200, ""
+    f = r.get("fields") or {}
+    if _wecom_dedup(f.get("MsgId") or ""):
+        return 200, ""
+    try:
+        threading.Thread(target=_wecom_work, args=(f,), daemon=True).start()
+    except Exception:  # noqa: BLE001
+        pass
+    return 200, ""
+
+
+def wecom_ingest(fields: dict) -> dict:
+    """本地模拟一条微信消息（前端「模拟一条」按钮 / 冒烟测试用）。"""
+    if not fields:
+        return {"ok": False, "error": "没给消息内容"}
+    f = dict(fields)
+    f.setdefault("FromUserName", (wecom_cfg().get("touser") or "").strip("@all") or "selftest")
+    f.setdefault("MsgType", "text")
+    f.setdefault("Content", "")
+    # 命令类的直接同步跑，方便一眼看到结果；其余丢后台
+    fast = _wecom_try_command(f.get("Content", ""), f["FromUserName"])
+    if fast is not None:
+        return {"ok": True, "sync": True, "reply": fast["text"]}
+    threading.Thread(target=_wecom_work, args=(f,), daemon=True).start()
+    return {"ok": True, "sync": False, "reply": "已丢给 OpenClaw，结果会发到微信"}
+
+
+# ---- 隧道：把本机 8777 临时暴露成 https，给企业微信回调 ----
+# 家里宽带通常没有公网 IP，cloudflared 的 quick tunnel 让本机主动连出去，
+# 换回一个 https://xxx.trycloudflare.com。不用改路由器、不用买服务器、不用备案。
+
+TUNNEL_STATE: dict = {"proc": None, "url": "", "status": "stopped",
+                      "started_at": 0.0, "log": []}
+SERVER_PORT = 8777
+_TUNNEL_URL_RE = re.compile(r"https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com")
+
+
+def tunnel_find() -> str:
+    """找 cloudflared 可执行文件。"""
+    cands = [shutil.which("cloudflared") or ""]
+    la = os.environ.get("LOCALAPPDATA") or ""
+    if la:
+        cands += [os.path.join(la, "cloudflared", "cloudflared.exe"),
+                  os.path.join(la, "Microsoft", "WinGet", "Links", "cloudflared.exe")]
+    cands += [os.path.join(BASE, "bin", "cloudflared.exe"),
+              r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+              r"C:\Program Files\cloudflared\cloudflared.exe",
+              "/usr/local/bin/cloudflared", "/opt/homebrew/bin/cloudflared"]
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return ""
+
+
+def _tunnel_reader(proc) -> None:
+    """cloudflared 把地址打在 stderr 上，逐行读出来抓 trycloudflare 域名。"""
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            if not line:
+                break
+            TUNNEL_STATE["log"] = (TUNNEL_STATE.get("log") or [] + [line.strip()[:300]])[-40:]
+            if not TUNNEL_STATE.get("url"):
+                m = _TUNNEL_URL_RE.search(line)
+                if m:
+                    TUNNEL_STATE["url"] = m.group(0)
+                    TUNNEL_STATE["status"] = "running"
+                    cf = wecom_cfg()
+                    cf["tunnel"] = m.group(0)
+                    cf["callback_url"] = m.group(0) + "/wecom/callback"
+                    save_config(CFG)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        TUNNEL_STATE["proc"] = None
+        TUNNEL_STATE["status"] = "stopped"
+
+
+def tunnel_state() -> dict:
+    proc = TUNNEL_STATE.get("proc")
+    running = bool(proc and proc.poll() is None)
+    if not running:
+        TUNNEL_STATE["status"] = "stopped"
+    exe = tunnel_find()
+    return {
+        "ok": running,
+        "status": TUNNEL_STATE.get("status") or "stopped",
+        "url": (TUNNEL_STATE.get("url") or "") if running else "",
+        "installed": bool(exe),
+        "exe": exe,
+        "log": TUNNEL_STATE.get("log") or [],
+        "started_at": TUNNEL_STATE.get("started_at") or 0,
+        "callback_url": _wecom_callback_url(),
+    }
+
+
+def tunnel_start(port: int = 0) -> dict:
+    proc = TUNNEL_STATE.get("proc")
+    if proc and proc.poll() is None:
+        return {"ok": True, "msg": "隧道已经在跑了", **tunnel_state()}
+    exe = tunnel_find()
+    if not exe:
+        return {"ok": False, "error": (
+            "没找到 cloudflared。装法任选一个：\n"
+            "· winget install --id Cloudflare.cloudflared\n"
+            "· 或去 github.com/cloudflare/cloudflared/releases 下 "
+            "cloudflared-windows-amd64.exe，改名 cloudflared.exe 丢进 workbench\\bin\\\n"
+            "· macOS: brew install cloudflared")}
+    p = int(port or SERVER_PORT or 8777)
+    try:
+        pr = subprocess.Popen(
+            [exe, "tunnel", "--url", f"http://127.0.0.1:{p}", "--no-autoupdate"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"启动 cloudflared 失败：{e}"}
+    TUNNEL_STATE.update({"proc": pr, "url": "", "status": "starting",
+                         "started_at": time.time(), "log": []})
+    threading.Thread(target=_tunnel_reader, args=(pr,), daemon=True).start()
+    return {"ok": True, "status": "starting", "msg": "隧道启动中，几秒后出地址", **tunnel_state()}
+
+
+def tunnel_stop() -> dict:
+    proc = TUNNEL_STATE.get("proc")
+    if proc and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+    TUNNEL_STATE.update({"proc": None, "url": "", "status": "stopped"})
+    return {"ok": True}
+
+
+def _wecom_egress_watch() -> None:
+    """启动后查一次公网出口 IP，跟上次记下的比。变了就提醒去更新可信IP。
+
+    家庭宽带 IP 一动，企业微信发消息就会报 60020，用户很难自己想明白，
+    所以这里主动喊一嗓子。
+    """
+    try:
+        time.sleep(6)                       # 等服务完全起来，别跟启动抢资源
+        r = integrations.egress_ip()
+        if not r.get("ok"):
+            return
+        ip = r["ip"]
+        cf = wecom_cfg()
+        old = (cf.get("egress_ip") or "").strip()
+        cf["egress_ip"] = ip
+        save_config(CFG)
+        if old and old != ip:
+            try:
+                STORE.log_add("warn",
+                              f"公网出口 IP 变了：{old} -> {ip}。"
+                              "如果不改「企业可信IP」，微信里就收不到工作台的消息了。", "wecom")
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _rem_push_once() -> int:
@@ -1215,10 +1691,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _text(self, body: str, ctype: str = "text/plain; charset=utf-8",
-              filename: str = ""):
-        """非 JSON 的裸文本响应（ICS 导出这类要落成文件用）。"""
+              filename: str = "", code: int = 200):
+        """非 JSON 的裸文本响应（ICS 导出、企业微信回调这类要落成文件用）。"""
         data = body.encode("utf-8")
-        self.send_response(200)
+        self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -1669,6 +2145,40 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/sysinfo":
             self._json(sysinfo_snapshot())
+            return
+
+        # ---- 企业微信：回调入口必须放在最前面，它不走 JSON ----
+        if p == "/wecom/callback":
+            code, body = wecom_handle_get(parse_qs(u.query))
+            self._text(body, code=code)
+            return
+
+        if p == "/api/wecom/status":
+            c = wecom_cfg()
+            # Secret 是发消息的总钥匙，绝不回前端；Token / AESKey 必须回，
+            # 因为要粘到企业微信后台的「接收消息」里，不显示用户没法配。
+            pub = {k: v for k, v in c.items() if k != "secret"}
+            pub["secret_set"] = bool(c.get("secret"))
+            pub["secret_tail"] = (c.get("secret") or "")[-4:]
+            t = tunnel_state()
+            pub["tunnel_status"] = t["status"]
+            pub["tunnel_url"] = t["url"]
+            pub["tunnel_installed"] = t["installed"]
+            pub["tunnel_exe"] = t["exe"]
+            pub["tunnel_log"] = t["log"]
+            pub["callback_url"] = _wecom_callback_url()
+            pub["ready_send"] = bool(c.get("corpid") and c.get("secret") and c.get("agentid"))
+            pub["ready_recv"] = bool(c.get("token") and c.get("aes_key"))
+            self._json(pub)
+            return
+
+        if p == "/api/wecom/egress":
+            r = integrations.egress_ip()
+            if r.get("ok"):
+                cf = wecom_cfg()
+                cf["egress_ip"] = r["ip"]
+                save_config(CFG)
+            self._json(r)
             return
 
         if p == "/api/search":
@@ -2464,6 +2974,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
             self._json({"ok": True, "bytes": got})
+            return
+
+        # ---- 企业微信回调：原始 XML + query 签名，不能用 _body() 解 JSON ----
+        if p == "/wecom/callback":
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b""
+            code, text = wecom_handle_post(raw, parse_qs(u.query))
+            self._text(text, code=code)
             return
 
         body = self._body()
@@ -3420,6 +3938,42 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
             return
 
+        if p == "/api/wecom/save":
+            c = wecom_cfg()
+            for k in ("enabled", "corpid", "secret", "agentid", "touser", "token",
+                      "aes_key", "msgtype", "callback_url"):
+                if k in body:
+                    c[k] = body[k]
+            if (c.get("callback_url") or "").strip():
+                c["callback_url"] = c["callback_url"].strip().rstrip("/")
+            save_config(CFG)
+            self._json({"ok": True, "callback_url": _wecom_callback_url()})
+            return
+
+        if p == "/api/wecom/genkey":
+            # Token / EncodingAESKey 必须由客户端随机生成（官方要求），
+            # 但手搓一串 43 位 base64 太反人类，这里代劳。
+            tok = wecommod.random_nonce() + wecommod.random_nonce()[:6]
+            key = wecommod.random_aes_key()
+            self._json({"ok": True, "token": tok, "aes_key": key})
+            return
+
+        if p == "/api/wecom/selfcheck":
+            self._json(integrations.wecom_selfcheck(dict(wecom_cfg())))
+            return
+
+        if p == "/api/wecom/ingest":
+            self._json(wecom_ingest(body or {}))
+            return
+
+        if p == "/api/wecom/tunnel/start":
+            self._json(tunnel_start(int(body.get("port") or 0)))
+            return
+
+        if p == "/api/wecom/tunnel/stop":
+            self._json(tunnel_stop())
+            return
+
         if p == "/api/connectors/push":
             cid = body.get("id")
             cons = CFG.get("connectors") or []
@@ -4346,6 +4900,7 @@ def _kb_retrieve(q: str, rows: list[dict], top: int = 5, cap: int = 12_000) -> l
 
 
 def main():
+    global SERVER_PORT
     port = 8777
     host = (CFG.get("remote") or {}).get("bind") or "127.0.0.1"
     argv = sys.argv[1:]
@@ -4353,9 +4908,13 @@ def main():
         port = int(argv[0])
     if "--host" in argv:
         host = argv[argv.index("--host") + 1]
+    SERVER_PORT = port
     srv = ThreadingHTTPServer((host, port), Handler)
     # 69 定时发送的看门人在后台，到点就把排队的邮件发出去
     threading.Thread(target=_mail_loop, daemon=True).start()
+    # 企业微信：出口 IP 变了要提醒（家宽动态 IP 一变，发消息就报 60020）
+    if wecom_cfg().get("enabled"):
+        threading.Thread(target=_wecom_egress_watch, daemon=True).start()
     # 114 启动留痕，日志页一眼能看到这次是几点起的
     try:
         STORE.log_add("info", f"工作台已启动：http://{host}:{port}", "server")
