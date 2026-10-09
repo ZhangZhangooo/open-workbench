@@ -2626,6 +2626,7 @@ body.light .warn { color: #d92d20; }
   transform: scale(1.008);
 }
 .tf-drop-t { font-size: 13.5px; font-weight: 500; margin-bottom: 4px; }
+.tf-mob { display: none; }   /* 实况照片那类提示只在窄屏出，免得桌面看着莫名其妙 */
 
 /* 上传队列：一行一个文件，进度条走完自己消失 */
 .tf-queue { margin-top: 8px; }
@@ -2758,6 +2759,7 @@ body.light .warn { color: #d92d20; }
   aside .side-foot { margin-top: 14px; }
   aside .side-foot button { min-height: 42px; }
   .console { display: none; }   /* 侧栏尾流在手机上纯占地方；日志在系统页里也有 */
+  .tf-mob { display: block; }   /* 互传页：iPhone 实况照片只在窄屏提示 */
 
   .scrim {
     display: block; position: fixed; inset: 0; z-index: 55;

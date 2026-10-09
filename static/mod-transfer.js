@@ -54,6 +54,7 @@ export default {
         <div class="tf-drop" id="tfDrop">
           <div class="tf-drop-t">把文件拖进来</div>
           <div class="note">或者点这里选文件 —— 手机上就是"选择文件 / 拍照"</div>
+          <div class="note tf-mob" id="tfLive">iPhone 的「实况照片」只能传静态那一张，动的 3 秒不会跟过来 —— 用「文件」App 把 .jpg 和 .mov 一起选中才会都传。</div>
         </div>
         <input type="file" id="tfPick" multiple hidden>
         <div id="tfQueue" class="tf-queue"></div>
