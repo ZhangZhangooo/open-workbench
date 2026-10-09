@@ -137,12 +137,22 @@ window.WB = {
   requestNotify,
   applyModuleCfg: (cfg) => applyModuleCfg(cfg),
   readModuleCfg: () => JSON.parse(JSON.stringify(moduleCfg)),
+  // 手机底栏那 4 个位子也让设置页能改（存 kv mobileTabs）
+  readMobileTabs: () => mobileTabs.slice(),
+  setMobileTabs: (arr) => {
+    const ok = (Array.isArray(arr) ? arr : []).filter((id) => MODULES.some((m) => m.id === id));
+    if (!ok.length) return false;
+    mobileTabs = ok;
+    renderMobar();
+    post('/api/kv/set', { k: 'mobileTabs', v: JSON.stringify(ok) });
+    return true;
+  },
 };
 
 // 注：AI（问一问）和文档页都不再单独占模块位，它们是 OpenClaw 页下的子标签，
 // 由 mod-claw.js 自己动态 import。别把它们加回 MODULES。
 const [mHome, mTasks, mFiles, mClaw, mSkills, mCal, mMail, mProjects, mNotes, mKb, mSystem, mSettings, mLife, mRoom, mMeet,
-  mPomo, mHabits, mClip, mReminders, mDaylog, mTools, mSystools, mFeatures] =
+  mPomo, mHabits, mClip, mReminders, mDaylog, mTools, mSystools, mFeatures, mTransfer] =
   await Promise.all([
     import('./mod-home.js'),
     import('./mod-tasks.js'),
@@ -167,6 +177,7 @@ const [mHome, mTasks, mFiles, mClaw, mSkills, mCal, mMail, mProjects, mNotes, mK
     import('./mod-tools.js'),
     import('./mod-systools.js'),
     import('./mod-features.js'),
+    import('./mod-transfer.js'),
   ]);
 
 const MODULES = [
@@ -176,6 +187,7 @@ const MODULES = [
   mPomo.default, mHabits.default, mClip.default, mReminders.default, mDaylog.default, mTools.default,
   mSystools.default,
   mFeatures.default,
+  mTransfer.default,
 ];
 
 window.WB.modules = MODULES;
@@ -216,10 +228,20 @@ function go(id, arg) {
   $('#topTitle').textContent = modLabel(m);
   window.__cur = id;
   document.querySelectorAll('.side-btn').forEach((b) => b.classList.toggle('on', b.dataset.id === id));
+  paintMobar();
+  closeNav();
   const e = built.get(id);
   if (e && e.mod && e.mod.onShow) {
     try { e.mod.onShow(arg); } catch (err) { console.error('[onShow]', id, err); }
   }
+  // 地址栏跟上当前模块（#transfer 这种）。用 replaceState 不写历史，
+  // 免得手机上的返回键变成"在模块之间来回跳"，那体验很怪。
+  // 好处是手机上可以把某一页直接存成主屏图标：/#transfer 一开就是互传。
+  try {
+    if (location.hash !== '#' + id) {
+      history.replaceState(null, '', location.pathname + location.search + '#' + id);
+    }
+  } catch (_) { /* file:// 或老浏览器不让改就算了 */ }
   post('/api/kv/set', { k: 'last_module', v: id });
 }
 
@@ -244,6 +266,7 @@ function applyModuleCfg(cfg) {
     labels: (cfg.labels && typeof cfg.labels === 'object') ? { ...cfg.labels } : {},
   };
   renderSide();
+  renderMobar();   // 底栏 tab 跟着启用/停用和改名走
   // 当前模块被关掉时跳到第一个可见模块，别停在看不见的页上
   if (currentId && moduleCfg.disabled.includes(currentId)) {
     const first = visibleModules()[0];
@@ -290,6 +313,111 @@ function reorderSide(targetId) {
   saveModuleCfg();
   toast('顺序已保存');
 }
+
+/* ---------- 手机 / 平板外壳：抽屉侧栏 + 底部 tab ----------
+   桌面上（>760px）这些元素都是 display:none，这段逻辑也基本不跑。
+   底部那 4 个 tab 是可配的：kv mobileTabs 存 id 数组，默认「今日 / 文件 / 互传 / OpenClaw」。
+   没上底栏的模块一个都没被砍 —— 全都在抽屉里，点「菜单」就出来。
+   抽屉用手滑也能关：从侧栏往左划一下就收，跟原生 App 一个手感。 */
+
+const MOB_ICON = {
+  home: '🏠', tasks: '✅', files: '📁', claw: '🤖', skills: '🧩', cal: '📅',
+  meet: '🎥', mail: '✉️', projects: '📌', notes: '🗒', kb: '📚', system: '📈',
+  settings: '⚙️', life: '🌱', room: '🛏', pomo: '🍅', habits: '🔁', clip: '📋',
+  reminders: '⏰', daylog: '📔', tools: '🧰', systools: '🖥', features: '🧪',
+  transfer: '📤',
+};
+const DEFAULT_TABS = ['home', 'files', 'transfer', 'claw'];
+let mobileTabs = DEFAULT_TABS.slice();
+
+// 手机上才认；桌面窗口拉很窄时也能预览到手机布局，方便调样式
+const isNarrow = () => window.matchMedia('(max-width: 760px)').matches;
+const iconOfMod = (m) => MOB_ICON[m.id] || (modLabel(m) || '·').slice(0, 1);
+
+function tabModules() {
+  const out = [];
+  mobileTabs.forEach((id) => {
+    const m = MODULES.find((x) => x.id === id);
+    if (m && isEnabled(m) && !out.includes(m)) out.push(m);
+  });
+  return out;
+}
+
+function renderMobar() {
+  const bar = $('#mobar');
+  if (!bar) return;
+  const tabs = tabModules();
+  bar.innerHTML = tabs.map((m) => `<button class="mo-btn" data-id="${esc(m.id)}">
+      <i class="mo-ic">${iconOfMod(m)}</i>
+      <span class="mo-tx">${esc(modLabel(m))}</span>
+      <em class="mo-badge" data-badge="${esc(m.id)}"></em>
+    </button>`).join('')
+    + `<button class="mo-btn" id="moMore"><i class="mo-ic">☰</i><span class="mo-tx">菜单</span></button>`;
+
+  tabs.forEach((m) => {
+    const b = bar.querySelector(`[data-id="${m.id}"]`);
+    if (b) b.onclick = () => go(m.id);
+  });
+  const more = bar.querySelector('#moMore');
+  if (more) more.onclick = () => openNav();
+  paintMobar();
+}
+
+function paintMobar() {
+  const bar = $('#mobar');
+  if (!bar) return;
+  bar.querySelectorAll('.mo-btn[data-id]').forEach((b) =>
+    b.classList.toggle('on', b.dataset.id === (window.__cur || '')));
+}
+
+function openNav() { document.body.classList.add('nav-open'); }
+function closeNav() { document.body.classList.remove('nav-open'); }
+
+function bindMobileShell() {
+  const burger = $('#btnMenu');
+  const scrim = $('#scrim');
+  if (burger) burger.onclick = () => {
+    document.body.classList.contains('nav-open') ? closeNav() : openNav();
+  };
+  if (scrim) scrim.onclick = closeNav;
+
+  // 抽屉里往左划 = 关掉
+  const aside = document.querySelector('aside');
+  if (aside) {
+    let x0 = null, y0 = null;
+    aside.addEventListener('touchstart', (e) => {
+      if (!isNarrow() || !e.touches.length) return;
+      x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+    }, { passive: true });
+    aside.addEventListener('touchend', (e) => {
+      if (x0 === null || !e.changedTouches.length) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - x0, dy = t.clientY - y0;
+      // 横向位移够大、并且明显比纵向大，才算「划」而不是「滚」
+      if (dx < -52 && Math.abs(dx) > Math.abs(dy) * 1.5) closeNav();
+      x0 = null; y0 = null;
+    }, { passive: true });
+  }
+
+  // 屏幕转回宽屏（比如平板横过来）时把抽屉状态清掉，免得留在「半开」
+  window.addEventListener('resize', () => { if (!isNarrow()) closeNav(); });
+}
+
+/* ---------- 极简 hash 路由：/#transfer 直达互传 ----------
+   只认「模块 id」，认不出来就当没有，不做真路由、不接管浏览器历史。
+   另外 /#nav 直接把抽屉拉开（手机上收藏这一条，进来就是模块总表）。 */
+const rawHash = () => (location.hash || '').replace(/^#\/?/, '').trim();
+
+function hashModule() {
+  const h = rawHash();
+  if (!h) return '';
+  return MODULES.some((m) => m.id === h) ? h : '';
+}
+
+window.addEventListener('hashchange', () => {
+  const h = hashModule();
+  if (h && h !== window.__cur) go(h);
+});
 
 /* ---------- 命令面板 ---------- */
 
@@ -564,8 +692,10 @@ async function refreshStatus() {
 
   MODULES.forEach((m) => {
     if (typeof m.badge !== 'function') return;
-    const el = document.querySelector(`[data-badge="${m.id}"]`);
-    if (el) el.textContent = m.badge(d) || '';
+    // 侧栏和手机底栏可能同时挂着同一个模块的角标，所以是 All 不是单选
+    document.querySelectorAll(`[data-badge="${m.id}"]`).forEach((el) => {
+      el.textContent = m.badge(d) || '';
+    });
   });
 }
 
@@ -649,16 +779,25 @@ async function boot() {
 }
 
 async function bootRest() {
-  let theme = {}, last = {}, ord = {}, mc = {};
+  let theme = {}, last = {}, ord = {}, mc = {}, tabs = {};
   try {
-    [theme, last, ord, mc] = await Promise.all([
+    [theme, last, ord, mc, tabs] = await Promise.all([
       api('/api/kv?k=theme'),
       api('/api/kv?k=last_module'),
       api('/api/kv?k=moduleOrder'),
       api('/api/kv?k=moduleConfig'),
+      api('/api/kv?k=mobileTabs'),
     ]);
   } catch (e) { console.error('[boot] kv 读取失败', e); }
   if (theme && theme.v === 'light') document.body.classList.add('light');
+  // 手机底栏放哪几个模块：没配过就用默认那四个
+  try {
+    const t = JSON.parse((tabs && tabs.v) || 'null');
+    if (Array.isArray(t) && t.length) {
+      const ok = t.filter((id) => MODULES.some((m) => m.id === id));
+      if (ok.length) mobileTabs = ok;
+    }
+  } catch (e) { /* 坏了就用默认 */ }
   try {
     const c = JSON.parse((mc && mc.v) || 'null');
     if (c && (Array.isArray(c.order) || Array.isArray(c.disabled) || c.labels)) {
@@ -686,11 +825,15 @@ async function bootRest() {
 
 function finishBoot(lastModule) {
   renderSide();
+  renderMobar();
+  bindMobileShell();
   mountSyncBadge();
   log('ok', 'boot', 'workbench online');
   let start = (lastModule && MODULES.some((m) => m.id === lastModule)) ? lastModule : 'home';
   if (moduleCfg.disabled.includes(start)) start = (visibleModules()[0] || {}).id || start;
-  go(start);
+  const h = hashModule();
+  go(h || start);
+  if (rawHash() === 'nav') openNav();
   refreshStatus();
   MODULES.forEach((m) => { if (m.boot) m.boot(); });
   notifyPoll();
@@ -737,9 +880,29 @@ function mountSyncBadge() {
   render(window.CloudSync ? window.CloudSync.state() : { published: false });
 }
 
+/* ---------- PWA：装到主屏 ----------
+   Service Worker 只在「安全上下文」里能注册 —— https，或 localhost / 127.0.0.1。
+   手机连 http://192.168.x.x:8777 这种局域网明文地址是**注册不上**的，
+   所以这里必须先判断，否则控制台天天多一条没用的报错，还容易被误会成 bug。
+   想真的全屏无地址栏：用设置页里那条 https 隧道地址打开，再加到主屏。 */
+function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+  const secure = location.protocol === 'https:'
+    || ['localhost', '127.0.0.1', '::1'].indexOf(location.hostname) >= 0;
+  if (!secure) {
+    console.info('[pwa] 明文局域网地址不注册 Service Worker（浏览器规定）。'
+      + '想装成 App 请改用 https 隧道地址。');
+    return;
+  }
+  navigator.serviceWorker.register('/sw.js').catch((e) => {
+    console.warn('[pwa] Service Worker 注册失败：', e && e.message);
+  });
+}
+
 tickClock();
 setInterval(tickClock, 1000);
 // 先 boot（内部先做云初始化，发布域名下会弹登录门），再开始 sysinfo 轮询，
 // 否则发布域名下 refreshSys 会抢在云初始化前打 /api/sysinfo 拿 404。
 boot().catch((e) => { console.error('[boot]', e); log('err', 'boot', (e && e.message) || String(e)); });
+registerSW();
 setInterval(refreshSys, 2000);

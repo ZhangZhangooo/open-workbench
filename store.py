@@ -460,6 +460,8 @@ BACKFILLS = [
     " WHERE created IS NULL",
 ]
 
+# 后加的表统一塞这个桶：它在 __init__ 里被 executescript，
+# 所以加新表不用再动 __init__（最早是给 prompts 用的，现在当"增量表"容器）。
 PROMPT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS prompts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -482,6 +484,20 @@ CREATE TABLE IF NOT EXISTS checkins (
     created REAL,
     UNIQUE(habit_id, day)
 );
+-- 设备间互传文件：元数据在库里，字节在 data/transfer/files/
+CREATE TABLE IF NOT EXISTS transfer (
+    id TEXT PRIMARY KEY,        -- 随机 16 位 hex，也是落盘文件名前缀
+    name TEXT,                  -- 原始文件名（给人看的）
+    size INTEGER,               -- 字节数
+    ctype TEXT,                 -- MIME，前端拿来选图标
+    src TEXT,                   -- 谁传的：LOCAL / LAN / 设备备注
+    path TEXT,                  -- data/transfer/files/ 下的真实文件名
+    created REAL,
+    expire_at REAL DEFAULT 0,   -- 0 = 不过期
+    hits INTEGER DEFAULT 0,     -- 被下载过几次
+    last_hit REAL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_transfer_created ON transfer(created DESC);
 """
 
 
@@ -2713,6 +2729,54 @@ class Store:
 
     def kv_set(self, k: str, v) -> dict:
         self._run("INSERT OR REPLACE INTO kv (k,v) VALUES (?,?)", (k, str(v)), False)
+        return {"ok": True}
+
+    # ================= 互传文件（电脑 ↔ 手机 / 平板） =================
+    # 字节在 data/transfer/files/，这里只放元数据。业务逻辑在 transfer.py。
+
+    def transfer_add(self, tid, name, size, ctype, src, path,
+                     created, expire_at) -> dict:
+        self._run(
+            "INSERT INTO transfer"
+            " (id,name,size,ctype,src,path,created,expire_at,hits,last_hit)"
+            " VALUES (?,?,?,?,?,?,?,?,0,0)",
+            (str(tid), str(name), int(size), str(ctype or ""), str(src or ""),
+             str(path), float(created), float(expire_at)), False)
+        return {"ok": True, "id": str(tid)}
+
+    def transfer_get(self, tid) -> dict | None:
+        rows = self._run("SELECT * FROM transfer WHERE id=?", (str(tid or ""),))
+        return rows[0] if rows else None
+
+    def transfer_list(self, limit: int = 400) -> list[dict]:
+        return self._run(
+            "SELECT * FROM transfer ORDER BY created DESC LIMIT ?", (int(limit),))
+
+    def transfer_expired(self, now: float) -> list[dict]:
+        """硬过期：上传时就定好了 expire_at，到点删。expire_at=0 表示永不过期。"""
+        return self._run(
+            "SELECT * FROM transfer WHERE expire_at > 0 AND expire_at < ?",
+            (float(now),))
+
+    def transfer_total(self) -> int:
+        rows = self._run("SELECT COALESCE(SUM(size),0) AS n FROM transfer")
+        return int(rows[0]["n"]) if rows else 0
+
+    def transfer_hit(self, tid, when: float) -> dict:
+        self._run("UPDATE transfer SET hits = hits + 1, last_hit = ? WHERE id = ?",
+                  (float(when), str(tid)), False)
+        return {"ok": True}
+
+    def transfer_del_ids(self, ids) -> dict:
+        ids = [str(i) for i in (ids or []) if i]
+        if not ids:
+            return {"ok": False, "error": "没给 id"}
+        q = ",".join("?" * len(ids))
+        self._run("DELETE FROM transfer WHERE id IN (%s)" % q, tuple(ids), False)
+        return {"ok": True, "removed": len(ids)}
+
+    def transfer_wipe(self) -> dict:
+        self._run("DELETE FROM transfer", (), False)
         return {"ok": True}
 
     def counts(self) -> dict:

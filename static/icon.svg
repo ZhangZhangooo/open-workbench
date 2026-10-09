@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <title>OpenWorkbench</title>
+  <defs>
+    <radialGradient id="glow" cx="30%" cy="16%" r="88%">
+      <stop offset="0" stop-color="#36d399" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#36d399" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- 满幅底色：maskable 图标会被系统裁成圆形，所以背景必须铺满整张画布，
+       不能像普通图标那样留圆角透明边，否则裁出来是缺角的。 -->
+  <rect width="512" height="512" fill="#0b0e14"/>
+  <rect width="512" height="512" fill="url(#glow)"/>
+  <!-- 图形是一行终端提示符 >_ ：工作台的身份就是「一个能敲命令的地方」。
+       所有笔画都落在中心 80% 的圆形安全区内，圆形/方圆/水滴形遮罩都裁不到。
+       描边用纯色、不用渐变 —— 这样和 smoke/_mkicon.py 烘出来的 PNG 完全一致。 -->
+  <g fill="none" stroke="#36d399" stroke-width="44"
+     stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="180,168 280,256 180,344"/>
+    <line x1="316" y1="344" x2="404" y2="344"/>
+  </g>
+</svg>

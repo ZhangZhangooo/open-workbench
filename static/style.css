@@ -2403,6 +2403,66 @@ body.light ::-webkit-scrollbar-thumb {
 }
 .term-tab .term-kill:hover { background: var(--err-soft); color: var(--err); opacity: 1; }
 
+/* 105 终端：字号控制 / 快捷命令条 / 辅助键行（手机没有实体键盘时的替代） */
+.term-fs { display: flex; gap: 6px; }
+.term-fs .btn { font-variant-numeric: tabular-nums; }
+
+.term-out { min-height: 120px; max-height: 300px; }
+.term-out:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-soft); }
+
+/* 横向滚动的细条：一排键帽 / 一排命令，屏幕窄也不会挤成两行 */
+.term-quick,
+.term-keys {
+  display: flex; gap: 6px; align-items: center;
+  flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+  padding-bottom: 6px; margin: 0 0 8px;
+  scrollbar-width: thin;
+}
+.term-quick:empty, .term-keys:empty { display: none; }
+.term-quick::-webkit-scrollbar,
+.term-keys::-webkit-scrollbar { height: 6px; }
+
+.qchip {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 10px;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--surface); color: var(--ink-2);
+  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  white-space: nowrap; cursor: pointer;
+  transition: border-color .16s var(--ease), color .16s var(--ease);
+}
+.qchip:hover { border-color: var(--accent); color: var(--accent); }
+.qchip.edit { border-style: dashed; }
+.qchip .qchip-x {
+  font-style: normal; font-size: 13px; line-height: 1;
+  padding: 0 2px; border-radius: 4px; opacity: .6;
+}
+.qchip .qchip-x:hover { background: var(--err-soft); color: var(--err); opacity: 1; }
+.qchip.qadd { border-style: dashed; color: var(--ink-3); }
+.qchip.qdone { color: var(--accent); border-color: var(--accent); }
+.qchip.qmore { color: var(--ink-3); padding: 0 9px; letter-spacing: 1px; }
+
+.kbtn {
+  flex: 0 0 auto; min-width: 38px; height: 30px; padding: 0 9px;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); color: var(--ink-2);
+  font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+  white-space: nowrap; cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+  transition: border-color .16s var(--ease), color .16s var(--ease), background .16s var(--ease);
+}
+.kbtn:hover { border-color: var(--accent); color: var(--accent); }
+.kbtn:active { background: var(--accent-soft); color: var(--accent); }
+
+/* 手机 / 平板：键帽放大到戳得准（≥44px），终端区给高一点 */
+@media (max-width: 760px) {
+  .kbtn { height: 44px; min-width: 46px; font-size: 14px; }
+  .qchip { height: 38px; font-size: 13px; }
+  .term-quick, .term-keys { gap: 8px; }
+  .term-out { min-height: 200px; max-height: 52vh; }
+  .term-ps { display: none; }
+}
+
 /* 109 资源实时曲线 */
 .sysspark { margin-bottom: 10px; }
 .sysspark-h {
@@ -2542,5 +2602,224 @@ body.light .warn { color: #d92d20; }
 #lanPanel.lan-locked { opacity: .78; }
 #lanPanel .field-row { align-items: center; }
 #lanUrls .we-cbrow code { min-width: 0; }
+
+/* ---------- 互传文件（电脑 ↔ 手机 / 平板） ---------- */
+
+/* 手机入口地址 */
+.tf-url {
+  flex: 1; min-width: 0; font-family: var(--mono); font-size: 12.5px;
+  padding: 6px 10px; background: var(--surface-2);
+  border: 1px solid var(--line-soft); border-radius: 8px;
+  word-break: break-all; user-select: all; color: var(--accent);
+}
+
+/* 拖拽区：桌面上拖文件进来；手机上点一下就是系统选文件 / 拍照面板 */
+.tf-drop {
+  border: 1.5px dashed var(--line-strong); border-radius: 12px;
+  padding: 22px 14px; text-align: center; cursor: pointer;
+  background: var(--surface-2);
+  transition: border-color .16s var(--ease), background .16s var(--ease), transform .16s var(--ease);
+}
+.tf-drop:hover { border-color: var(--accent); }
+.tf-drop.on {
+  border-color: var(--accent); background: var(--accent-soft);
+  transform: scale(1.008);
+}
+.tf-drop-t { font-size: 13.5px; font-weight: 500; margin-bottom: 4px; }
+
+/* 上传队列：一行一个文件，进度条走完自己消失 */
+.tf-queue { margin-top: 8px; }
+.tf-queue:empty { margin-top: 0; }
+.tf-up {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 8px; border-radius: 8px; font-size: 12.5px;
+  background: var(--surface-2); margin-bottom: 5px;
+  transition: background .2s var(--ease);
+}
+.tf-up-n {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.tf-up-bar {
+  flex: none; width: 120px; height: 6px; border-radius: 999px;
+  background: var(--line); overflow: hidden;
+}
+.tf-up-bar > i {
+  display: block; height: 100%; width: 0;
+  background: var(--accent); border-radius: 999px;
+  transition: width .18s linear;
+}
+.tf-up-p { flex: none; width: 46px; text-align: right; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.tf-up.ok { background: var(--accent-soft); }
+.tf-up.ok .tf-up-p { color: var(--ok); }
+.tf-up.err { background: var(--err-soft); }
+.tf-up.err .tf-up-bar > i { background: var(--err); }
+.tf-up.err .tf-up-p { color: var(--err); }
+
+/* 容量条 */
+.tf-bar {
+  height: 7px; border-radius: 999px; background: var(--line);
+  overflow: hidden; margin-top: 4px;
+}
+.tf-bar > i {
+  display: block; height: 100%; width: 0;
+  background: var(--accent); border-radius: 999px;
+  transition: width .25s var(--ease);
+}
+
+/* 收件箱列表 */
+.tf-list { display: flex; flex-direction: column; }
+.tf-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 6px; border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px; color: var(--ink);
+  transition: background .14s var(--ease);
+}
+.tf-item:hover { background: var(--hover); }
+.tf-ck { flex: none; accent-color: var(--accent); cursor: pointer; }
+.tf-ic { flex: none; font-size: 15px; line-height: 1; }
+.tf-n {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.tf-m { flex: none; font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.tf-from { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-ago { min-width: 52px; text-align: right; }
+.tf-left { min-width: 76px; text-align: right; }
+.tf-dl {
+  flex: none; padding: 3px 11px; font-size: 11.5px; border-radius: 7px;
+  text-decoration: none; display: inline-flex; align-items: center;
+}
+.tf-x {
+  flex: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--ink-3); font-size: 15px; line-height: 1;
+  padding: 2px 5px; border-radius: 6px;
+}
+.tf-x:hover { background: var(--err-soft); color: var(--err); }
+.tf-limits { font-weight: 400; }
+
+/* 收件箱工具行：手机上自动折行，别把按钮挤成一条缝 */
+.tf-tools { margin-top: 8px; }
+.tf-tools .tf-spacer { flex: 1; min-width: 0; }
+.tf-tools input[type="checkbox"] { height: auto; }
+.tf-selall { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+
+/* 手机上：一行塞不下那么多列，砍掉次要信息，把点击区放大到能戳中 */
+@media (max-width: 640px) {
+  .tf-item { flex-wrap: wrap; padding: 10px 6px; row-gap: 6px; }
+  .tf-n { flex: 1 1 100%; order: -1; white-space: normal; word-break: break-all; }
+  .tf-from { display: none; }
+  .tf-dl, .tf-x { min-height: 34px; }
+  .tf-dl { padding: 6px 16px; font-size: 12.5px; }
+  .tf-x { font-size: 19px; padding: 4px 10px; }
+  .tf-drop { padding: 28px 14px; }
+  .tf-up-bar { width: 74px; }
+}
+
+/* ============ 手机 / 平板外壳 ============
+   桌面（>760px）下这三个元素全是 display:none，下面一条规则都不生效。
+   断点选 760px 的理由：手机竖屏 360-430、手机横屏 640-930、
+   平板竖屏 768-834。取 760 能把手机横屏一起收进来，
+   又不会误伤平板竖屏及以上的宽屏布局。 */
+
+.mburger, .scrim, .mobar { display: none; }
+
+@media (max-width: 760px) {
+
+  /* --- 顶栏瘦身：留「菜单 / 品牌 / 时钟 / ⌘K」，其余指标收进设置页 --- */
+  .topstat { height: 50px; gap: 10px; padding: 0 10px; font-size: 11.5px; }
+  .topstat .m:not(.clk), .topstat .ver { display: none; }
+  .topstat .brand { font-size: 11.5px; letter-spacing: .2px; overflow: hidden; text-overflow: ellipsis; }
+  .topstat .clk { margin-left: auto; }
+
+  /* 汉堡按钮：三条杠，触控区 40px */
+  .mburger {
+    display: inline-flex; flex: none;
+    flex-direction: column; justify-content: center; gap: 4px;
+    width: 40px; height: 40px; margin-left: -4px; padding: 0 9px;
+    border: 0; border-radius: 9px; background: transparent; cursor: pointer;
+  }
+  .mburger:active { background: var(--hover); }
+  .mburger span { display: block; height: 2px; border-radius: 2px; background: var(--ink-2); }
+  .mburger span:nth-child(2) { width: 74%; }
+
+  /* --- 侧栏 → 从左边滑出的抽屉 --- */
+  aside {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 60;
+    width: 84vw; max-width: 306px;
+    padding: 16px 12px calc(16px + env(safe-area-inset-bottom, 0px));
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
+    transform: translateX(-104%);
+    transition: transform .27s var(--ease);
+    box-shadow: 0 12px 46px rgba(0, 0, 0, .5);
+  }
+  body.nav-open aside { transform: none; }
+  aside .side-btn { min-height: 46px; font-size: 14px; padding: 11px 12px; }
+  aside .side-foot { margin-top: 14px; }
+  aside .side-foot button { min-height: 42px; }
+  .console { display: none; }   /* 侧栏尾流在手机上纯占地方；日志在系统页里也有 */
+
+  .scrim {
+    display: block; position: fixed; inset: 0; z-index: 55;
+    background: rgba(0, 0, 0, .46);
+    opacity: 0; visibility: hidden;
+    transition: opacity .24s var(--ease), visibility 0s .24s;
+  }
+  body.nav-open .scrim {
+    opacity: 1; visibility: visible;
+    transition: opacity .24s var(--ease), visibility 0s;
+  }
+
+  /* --- 主区留白收紧 --- */
+  .topbar { height: 44px; padding: 0 12px; gap: 8px; }
+  .topbar .t { font-size: 15px; }
+  .mod.on { padding: 12px 12px 0; }
+  .cmdk-box { width: calc(100vw - 24px); margin-top: 11vh; }
+  .cmdk-list { max-height: 48vh; }
+
+  /* 提示语别被底下那条 tab 盖住 */
+  #toasts {
+    left: 12px; right: 12px; bottom: calc(18px + 56px + env(safe-area-inset-bottom, 0px));
+  }
+  .toast { font-size: 12.5px; }
+
+  /* --- 底部 tab 条 --- */
+  .mobar {
+    display: flex; flex: none; align-items: stretch;
+    height: calc(56px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--surface); border-top: 1px solid var(--line);
+  }
+  .mo-btn {
+    position: relative; flex: 1 1 0; min-width: 0; min-height: 52px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; padding: 6px 2px 4px;
+    border: 0; background: transparent; cursor: pointer;
+    color: var(--ink-3); font-size: 10px; line-height: 1.25;
+    -webkit-tap-highlight-color: transparent;
+    transition: color .16s var(--ease), background .16s var(--ease);
+  }
+  .mo-btn:active { background: var(--hover); }
+  .mo-btn.on { color: var(--accent); }
+  .mo-btn.on::after {
+    content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+    width: 22px; height: 2.5px; border-radius: 0 0 3px 3px; background: var(--accent);
+  }
+  .mo-ic { font-size: 19px; line-height: 1; font-style: normal; }
+  .mo-tx { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mo-badge {
+    position: absolute; top: 3px; left: 50%; margin-left: 6px;
+    min-width: 15px; padding: 0 4px; border-radius: 999px;
+    background: var(--accent); color: var(--bg);
+    font-size: 9.5px; font-style: normal; font-weight: 600; line-height: 15px;
+    text-align: center;
+  }
+  .mo-badge:empty { display: none; }
+}
+
+/* 大屏（≥761px）上抽屉状态一律无效，防止窄窗口切宽后卡在「开着」 */
+@media (min-width: 761px) {
+  body.nav-open aside { transform: none; }
+}
 
 

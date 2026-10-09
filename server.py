@@ -39,6 +39,7 @@ import sysinfo  # noqa: E402
 import docsio  # noqa: E402
 import conpty  # noqa: E402
 import wecom as wecommod  # noqa: E402
+import transfer as transfermod  # noqa: E402
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -1815,6 +1816,13 @@ MIME = {
     ".css": "text/css; charset=utf-8",
     ".js": "application/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
+    # PWA 用得上：清单和图标。少了这俩 Chrome 会把 manifest 当二进制附件，
+    # 「添加到主屏幕」就装不成正经应用，只能存个书签。
+    ".webmanifest": "application/manifest+json; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
 }
 
 
@@ -1863,6 +1871,33 @@ class Handler(BaseHTTPRequestHandler):
                 "attachment; filename*=UTF-8''" + quote(filename, safe=""))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_file(self, path: str, item: dict):
+        """下载收件箱里的文件。分块往外吐 —— 大文件不能整个读进内存。"""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            self._json({"ok": False, "error": "文件读不到了，可能刚被清掉"}, 404)
+            return
+        name = (item.get("name") or os.path.basename(path)) or "download"
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         item.get("ctype") or "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition",
+                         "attachment; filename*=UTF-8''" + quote(name, safe=""))
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 16)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass          # 手机端点了"取消下载"，正常，别写日志刷屏
+        transfermod.bump_hit(STORE, item.get("id") or "")
 
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
@@ -2330,8 +2365,38 @@ class Handler(BaseHTTPRequestHandler):
         if p in ("/", "/index.html"):
             self._static("index.html")
             return
+
+        # PWA 的两个根路径文件。不能塞在 /static/ 下：
+        # Service Worker 的作用域只能是它自己所在目录及以下，放 /static/sw.js
+        # 就管不到 / 这个页面了（等于白装）。
+        if p == "/manifest.webmanifest":
+            self._static("manifest.webmanifest")
+            return
+        if p == "/sw.js":
+            self._static("sw.js")
+            return
+
         if p.startswith("/static/"):
             self._static(p[len("/static/"):])
+            return
+
+        # ---- 互传文件（电脑 ↔ 手机 / 平板）----
+        # 注意：这两个接口**故意不放进 LOCAL_ONLY_PREFIX**，否则手机端根本用不了。
+        # 它们受 _lan_gate() 管：开闸时要口令，关闸时同网段直接进。
+        if p == "/api/transfer/list":
+            self._json(transfermod.list_items(STORE))
+            return
+
+        if p == "/api/transfer/get":
+            got = transfermod.path_of(STORE, parse_qs(u.query).get("id", [""])[0])
+            if not got:
+                self._json({"ok": False, "error": "文件不在了：可能已过期，或被清掉了"}, 404)
+                return
+            self._send_file(got[0], got[1])
+            return
+
+        if p == "/api/transfer/cfg":
+            self._json({"ok": True, "cfg": transfermod.cfg(STORE)})
             return
 
         if p == "/api/status":
@@ -3231,6 +3296,33 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "bytes": got})
             return
 
+        # ---- 互传文件：收文件 ----
+        # 手机浏览器 fetch(url, {method:'POST', body: file}) 直接发原始字节流，
+        # 所以这里必须**绕过 _body()**（那个是解 JSON 的，会把文件头吃掉）。
+        # 文件名走 query 参数（前端 encodeURIComponent）：HTTP 头只认 latin-1，
+        # 中文文件名塞进头里必炸。
+        if p == "/api/transfer/upload":
+            q = parse_qs(u.query)
+            name = q.get("name", [""])[0] or ""
+            try:
+                hours = int(q.get("hours", ["0"])[0] or 0)
+            except (TypeError, ValueError):
+                hours = 0
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            if not length:
+                self._json({"ok": False, "error": "没收到内容（空文件不支持）"}, 400)
+                return
+            src = q.get("src", [""])[0] or ("本机" if self._is_local() else "局域网")
+            res = transfermod.add_file(
+                STORE, name, self.rfile, length,
+                ctype=self.headers.get("Content-Type") or "",
+                src=src, hours=hours)
+            self._json(res, 200 if res.get("ok") else 400)
+            return
+
         # ---- 企业微信回调：原始 XML + query 签名，不能用 _body() 解 JSON ----
         if p == "/wecom/callback":
             n = int(self.headers.get("Content-Length") or 0)
@@ -3654,6 +3746,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/kv/set":
             self._json(STORE.kv_set(body.get("k", ""), body.get("v", "")))
+            return
+
+        # ---- 互传文件：删除 / 清空 / 改配置 ----
+        if p == "/api/transfer/del":
+            self._json(transfermod.remove(STORE, body.get("ids")))
+            return
+
+        if p == "/api/transfer/clear":
+            self._json(transfermod.clear(STORE))
+            return
+
+        if p == "/api/transfer/cfg/save":
+            self._json({"ok": True, "cfg": transfermod.save_cfg(STORE, body)})
             return
 
         if p == "/api/mail/send":

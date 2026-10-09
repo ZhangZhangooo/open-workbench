@@ -206,20 +206,31 @@ export default {
         </div>
 
         <div class="panel">
-          <h3>内置终端 <span id="termMode" class="tag"></span></h3>
-          <div class="note" style="margin-bottom:8px">⚠️ 在<strong>你本机</strong>执行命令，权限等同你自己。别跑不认识的命令。点终端区域即可输入。可以开多个标签，各自一个 PowerShell 会话。</div>
+          <h3 style="display:flex;align-items:center;gap:8px">
+            <span>内置终端</span>
+            <span id="termMode" class="tag"></span>
+            <span style="flex:1"></span>
+            <span class="term-fs">
+              <button class="btn slim" id="termFsDown" title="终端字号小一点">A−</button>
+              <button class="btn slim" id="termFsUp" title="终端字号大一点">A+</button>
+            </span>
+          </h3>
+          <div class="note" style="margin-bottom:8px">⚠️ 在<strong>你本机</strong>执行命令，权限等同你自己。别跑不认识的命令。点终端区域即可输入。可以开多个标签，各自一个 PowerShell 会话。手机上用下面的<strong>键帽</strong>发 Ctrl / Esc / 方向键，用<strong>常用命令</strong>一键跑。</div>
           <div id="termTabs" class="term-tabs"></div>
+          <div id="termQuick" class="term-quick"></div>
           <div style="position:relative">
-            <pre id="termOut" tabindex="0" style="background:#0c0c0c;color:#e5e5e5;border-radius:8px;padding:10px;max-height:300px;min-height:120px;overflow:auto;font-size:12.5px;line-height:1.45;white-space:pre;margin:0 0 8px;outline:none"></pre>
+            <pre id="termOut" class="term-out" tabindex="0" style="background:#0c0c0c;color:#e5e5e5;border-radius:8px;padding:10px;overflow:auto;font-size:12.5px;line-height:1.45;white-space:pre;margin:0 0 8px;outline:none"></pre>
             <textarea id="termCap" aria-hidden="true" spellcheck="false" autocomplete="off"
               style="position:absolute;inset:0;width:100%;height:100%;margin:0;padding:10px;border:0;outline:none;resize:none;background:transparent;color:transparent;caret-color:transparent;overflow:hidden;white-space:pre;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.45"></textarea>
           </div>
+          <div id="termKeys" class="term-keys"></div>
           <div id="termBar" style="display:flex;gap:8px;align-items:center">
-            <span style="align-self:center;color:var(--ink-3)">$</span>
-            <input id="termIn" placeholder="dir / ipconfig / python -c ..." style="flex:1;height:34px;font-family:monospace">
+            <span class="term-ps" style="align-self:center;color:var(--ink-3)">$</span>
+            <input id="termIn" placeholder="dir / ipconfig / python -c ..." style="flex:1;min-width:0;height:34px;font-family:monospace">
             <button class="btn primary" id="termRun">运行</button>
             <button class="btn" id="termRestart" style="display:none">重启</button>
           </div>
+          <div class="note" id="termMob" style="margin:8px 0 0"></div>
         </div>
       </div>`;
 
@@ -546,12 +557,180 @@ export default {
     const restart = this.el.querySelector('#termRestart');
     const modeTag = this.el.querySelector('#termMode');
     const tabsBox = this.el.querySelector('#termTabs');
+    const quickBox = this.el.querySelector('#termQuick');
+    const keysBox = this.el.querySelector('#termKeys');
+    const mobNote = this.el.querySelector('#termMob');
+    const fsUp = this.el.querySelector('#termFsUp');
+    const fsDown = this.el.querySelector('#termFsDown');
 
-    const computeSize = () => ({
-      cols: Math.max(20, Math.floor(out.clientWidth / 7.4) || 120),
-      rows: Math.max(6, Math.floor(out.clientHeight / 18) || 30),
-    });
     const active = () => this.tabs.find((t) => t.sid === this.activeSid) || null;
+    // 交互中的标签（PTY 活着、能收 /api/term/in）—— 键帽和常用命令都打给它
+    const termTarget = () => { const t = active(); return (t && t.mode === 'interactive') ? t : null; };
+    // 窄屏 = 手机 / 平板。桌面上这些逻辑基本不跑。
+    const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+    // 字号**分屏各记一份**：手机竖屏要 15px 才看得清，桌面 12.5px 正好；
+    // 存同一个 kv 的话，手机上放大一次，回到电脑上终端就变成傻大个。
+    const fsKey = () => (narrow() ? 'termFontSizeNarrow' : 'termFontSize');
+
+    /* 字符格尺寸实测：别再用 7.4 / 18 这种写死的估值 —— 一改字号列数就错位，换行全乱。
+       量一次缓存，字号变了再量。 */
+    let cellW = 0, cellH = 0, cellOk = false;
+    const measureCell = (force) => {
+      if (cellOk && !force) return;
+      const cs = getComputedStyle(out);
+      const probe = document.createElement('span');
+      probe.textContent = 'MMMMMMMMMMMMMMMMMMMM';
+      probe.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:pre'
+        + ';font-family:' + cs.fontFamily + ';font-size:' + cs.fontSize
+        + ';line-height:' + cs.lineHeight + ';font-weight:' + cs.fontWeight;
+      document.body.appendChild(probe);
+      const r = probe.getBoundingClientRect();
+      document.body.removeChild(probe);
+      const fs0 = parseFloat(cs.fontSize) || 12.5;
+      const w = r.width / 20, h = r.height;
+      if (w > 1) { cellW = w; cellH = h > 1 ? h : fs0 * 1.45; cellOk = true; }
+      else { cellW = 7.4; cellH = fs0 * 1.45; }   // 面板还藏着量不到，先给估值，等真显示了再量
+    };
+    const computeSize = () => {
+      measureCell();
+      const cs = getComputedStyle(out);
+      const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+      const w = Math.max(80, (out.clientWidth || 320) - padX);
+      return {
+        cols: Math.max(20, Math.floor(w / cellW)),
+        rows: Math.max(6, Math.floor((out.clientHeight || 240) / cellH)),
+      };
+    };
+
+    /* ---------- 手机 / 平板专属：键帽行 ----------
+       手机没有 Ctrl / Esc / Tab / 方向键，也没有 Ctrl+C 打断。
+       补一排键帽，点一下就把对应的 VT 序列发给当前标签的 PTY。 */
+    const KEYS = [
+      { t: 'Esc', s: '\x1b' }, { t: 'Tab', s: '\t' },
+      { t: '^C', s: '\x03' }, { t: '^D', s: '\x04' }, { t: '^Z', s: '\x1a' },
+      { t: '↑', s: '\x1b[A' }, { t: '↓', s: '\x1b[B' },
+      { t: '←', s: '\x1b[D' }, { t: '→', s: '\x1b[C' },
+      { t: 'Home', s: '\x1b[H' }, { t: 'End', s: '\x1b[F' },
+      { t: '|', s: '|' }, { t: '&', s: '&' }, { t: '>', s: '>' },
+      { t: '~', s: '~' }, { t: '/', s: '/' }, { t: '\\', s: '\\' },
+      { t: '-', s: '-' }, { t: '*', s: '*' }, { t: ':', s: ':' },
+    ];
+    const insertInp = (s) => {
+      const p = inp.selectionStart == null ? inp.value.length : inp.selectionStart;
+      const q = inp.selectionEnd == null ? p : inp.selectionEnd;
+      inp.value = inp.value.slice(0, p) + s + inp.value.slice(q);
+      try { inp.setSelectionRange(p + s.length, p + s.length); } catch (_) {}
+      inp.focus();
+    };
+    const paintKeys = () => {
+      if (!keysBox) return;
+      keysBox.innerHTML = KEYS.map((k, i) =>
+        `<button class="kbtn" type="button" data-i="${i}">${esc(k.t)}</button>`).join('')
+        + '<button class="kbtn" type="button" data-i="-1" title="清屏（终端自己执行 cls）">cls</button>';
+      keysBox.querySelectorAll('.kbtn').forEach((b) => {
+        b.onclick = async () => {
+          const i = +b.dataset.i;
+          if (i < 0) { await sendCmd('cls'); return; }
+          const k = KEYS[i];
+          const t = termTarget();
+          if (t) { await post('/api/term/in', { sid: t.sid, data: k.s }); if (!narrow()) cap.focus(); return; }
+          if (k.s.length === 1) { insertInp(k.s); return; }   // 非交互模式：可打印字符直接补进输入框
+          toast(`「${k.t}」要有交互终端才能发 —— 现在是普通执行模式`);
+        };
+      });
+    };
+
+    /* ---------- 手机 / 平板专属：常用命令条 ----------
+       手机上一键跑常用命令，不用一个字母一个字母戳软键盘。存 kv termQuickCmds，
+       点「···」进管理态，能加自己的、能删。 */
+    const DEFAULT_QS = ['dir', 'ipconfig', 'cls', 'git status'];
+    // 送一条命令给当前终端：交互模式直接发进 PTY，否则走「运行」那条兜底路
+    const sendCmd = async (cmd) => {
+      const t = termTarget();
+      if (t) { await post('/api/term/in', { sid: t.sid, data: cmd + '\r' }); return; }
+      inp.value = cmd;
+      await run();
+    };
+    const saveTermPrefs = () => {
+      post('/api/kv/set', { k: 'termQuickCmds', v: JSON.stringify(this.termQs || []) }).catch(() => {});
+      post('/api/kv/set', { k: fsKey(), v: String(this.fs) }).catch(() => {});
+    };
+    const paintQuick = () => {
+      if (!quickBox) return;
+      const list = this.termQs || [];
+      const edit = !!this.termQsEdit;
+      quickBox.innerHTML = list.map((c) => `
+        <button class="qchip${edit ? ' edit' : ''}" type="button" data-c="${esc(c)}">
+          <span>${esc(c)}</span>${edit ? '<i class="qchip-x" title="删掉这条">×</i>' : ''}
+        </button>`).join('')
+        + (edit
+          ? '<button class="qchip qadd" type="button" data-a="add">＋ 加一条</button>'
+            + '<button class="qchip qdone" type="button" data-a="done">完成</button>'
+          : '<button class="qchip qmore" type="button" data-a="edit" title="增删常用命令">···</button>');
+      quickBox.querySelectorAll('.qchip').forEach((b) => {
+        b.onclick = async (e) => {
+          const a = b.dataset.a;
+          if (a === 'add') {
+            const v = prompt('加一条常用命令（手机上一键跑）', '');
+            if (v && v.trim()) {
+              this.termQs = (this.termQs || []).concat(v.trim()).slice(0, 24);
+              saveTermPrefs(); paintQuick();
+            }
+            return;
+          }
+          if (a === 'done') { this.termQsEdit = false; paintQuick(); return; }
+          if (a === 'edit') { this.termQsEdit = true; paintQuick(); return; }
+          const cmd = b.dataset.c;
+          if (edit) {
+            if (e.target.closest('.qchip-x')) {
+              this.termQs = (this.termQs || []).filter((x) => x !== cmd);
+              saveTermPrefs(); paintQuick();
+            }
+            return;
+          }
+          await sendCmd(cmd);
+        };
+      });
+    };
+
+    /* ---------- 字号 ----------
+       桌面上 12.5px 够用，手机竖着看太小，默认放大。A−/A+ 随手调，存 kv，
+       改完把新的行列数报给 PTY，别让换行跟屏幕对不上。 */
+    const FS_MIN = 11, FS_MAX = 24;
+    const applyFs = () => {
+      const lh = Math.round(this.fs * 1.35 * 100) / 100;
+      [out, cap].forEach((elp) => {
+        if (!elp) return;
+        elp.style.fontSize = this.fs + 'px';
+        elp.style.lineHeight = lh + 'px';
+      });
+      measureCell(true);
+      const sz = computeSize();
+      const t = termTarget();
+      if (t) post('/api/term/resize', { sid: t.sid, ...sz }).catch(() => {});
+      const a = active();
+      if (a && a.emu) a.emu.cols = sz.cols;
+    };
+
+    // 终端能不能用、手机上怎么用：写在这一行说明里，别让人对着 403 猜
+    const paintMobNote = (t) => {
+      if (!mobNote) return;
+      const bits = [];
+      if (this.termBlocked) {
+        bits.push('<b style="color:var(--warn)">终端被主机拦下了（403）</b>：主机开着「局域网口令闸」时，终端接口只准本机调用。'
+          + '想在这台设备上用，回主机打开 <b>设置 → 局域网访问</b>，把口令闸关掉（关闸后终端一并放开）。');
+      }
+      const cur = t || active();
+      if (cur && cur.mode === 'run') {
+        bits.push('当前是<strong>普通执行模式</strong>（这台机器没跑起交互终端）：一条一条执行、看不到实时输出，Ctrl+C 这类控制键也用不了。');
+      }
+      if (narrow()) {
+        bits.push('手机上：上面那排键帽发 Ctrl / Esc / 方向键，「···」里能加自己的常用命令；'
+          + 'A− / A+ 调字号。要敲长命令就点下面的输入框。');
+      }
+      mobNote.innerHTML = bits.join('<br>');
+      mobNote.style.display = bits.length ? '' : 'none';
+    };
 
     // 用 rAF 节流重渲染：PTY 输出常是一连串小帧，逐帧整屏重绘会卡，合到下一帧只画一次
     let raf = null;
@@ -585,10 +764,18 @@ export default {
       modeTag.textContent = t ? (interactive ? '交互' : '非交互') : '';
       out.innerHTML = (t && t.emu) ? t.emu.render() : '';
       bar.style.display = 'flex';
-      inp.style.display = interactive ? 'none' : '';
+      // 手机上没有实体键盘：交互模式下也把输入框留着（软键盘敲一行 + 回车），
+      // 别把唯一的输入入口藏掉。桌面有真键盘，照旧藏起来直接往终端区敲。
+      inp.style.display = (interactive && !narrow()) ? 'none' : '';
+      inp.placeholder = interactive ? '在这敲一行，回车送给当前终端' : 'dir / ipconfig / python -c ...';
       restart.style.display = t ? '' : 'none';
+      // 手机软键盘敲的可打印字符进不了透明捕获层（keydown 常给 Unidentified），
+      // 干脆别让它抢点击：点终端不弹键盘，要输入走下面的输入框。
+      cap.style.pointerEvents = narrow() ? 'none' : '';
       out.scrollTop = out.scrollHeight;
-      if (interactive) cap.focus();
+      if (interactive && !narrow()) cap.focus();
+      paintKeys();
+      paintMobNote(t);
     };
 
     const openStream = (t) => {
@@ -610,11 +797,13 @@ export default {
     const startTab = async (t) => {
       const sz = computeSize();
       const r = await post('/api/term/start', { sid: t.sid, cols: sz.cols, rows: sz.rows });
-      if (!r || !r.ok) {   // 本机不支持 ConPTY，退回非交互模式
+      if (!r || !r.ok) {   // 本机不支持 ConPTY，或者被口令闸拦了，退回非交互模式
         t.mode = 'run'; t.emu = null;
+        if (r && (r.unauthorized || /只允许本机/.test(r.error || ''))) this.termBlocked = true;
         if (t.sid === this.activeSid) syncUi();
         return;
       }
+      this.termBlocked = false;
       t.mode = 'interactive';
       t.emu = new TermEmu(sz.cols);
       if (t.es) { try { t.es.close(); } catch (_) {} t.es = null; }
@@ -667,18 +856,26 @@ export default {
       if (t && t.mode === 'interactive') {
         await post('/api/term/in', { sid: t.sid, data: cmd + '\r' });
         inp.value = '';
+        if (narrow()) inp.focus();      // 手机上别让软键盘收回去，连着敲好几条
         return;
       }
       out.textContent += '$ ' + cmd + '\n';
       const r = await post('/api/term/run', { cmd });
-      if (!r.ok) out.textContent += (r.error || '执行失败') + '\n';
-      else {
+      if (!r.ok) {
+        const blocked = !!(r.unauthorized || /只允许本机/.test(r.error || ''));
+        if (blocked) this.termBlocked = true;
+        out.textContent += (blocked
+          ? '终端接口被拦下了：主机开着「局域网口令闸」，终端只准本机调用。\n去主机打开 设置 → 局域网访问，把口令闸关掉。'
+          : (r.error || '执行失败')) + '\n';
+        paintMobNote(active());
+      } else {
         if (r.out) out.textContent += r.out + '\n';
         if (r.err) out.textContent += r.err + '\n';
         out.textContent += '[exit ' + r.code + ']\n';
       }
       out.scrollTop = out.scrollHeight;
       inp.value = '';
+      if (narrow()) inp.focus();
     };
 
     restart.onclick = () => {
@@ -739,23 +936,75 @@ export default {
       if (text) { e.preventDefault(); post('/api/term/in', { sid: t.sid, data: text }); }
     });
 
-    // 尺寸变化同步给当前标签的 PTY（最佳努力）
+    // 尺寸变化同步给当前标签的 PTY（最佳努力）—— 字号一改、窗口一拉、手机转个屏，
+    // 行列数都得重报；不然 PowerShell 还按老宽度换行，屏幕上糊成一片。
     if (typeof ResizeObserver !== 'undefined') {
       this._termRO = new ResizeObserver(() => {
         const t = live();
-        if (t) post('/api/term/resize', { sid: t.sid, ...computeSize() });
+        if (!t) return;
+        const sz = computeSize();
+        post('/api/term/resize', { sid: t.sid, ...sz });
+        if (t.emu) t.emu.cols = sz.cols;
       });
       this._termRO.observe(out);
     }
 
     this._startTab = startTab;
     this._attachTab = (t) => { if (t && t.mode === 'interactive') openStream(t); };
+    // 面板从隐藏变可见时叫一次：重量字符格 + 重排行列数（onShow 里调）
+    this._termRedraw = () => { measureCell(true); applyFs(); syncUi(); };
     this.el.querySelector('#termRun').onclick = run;
     inp.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); run(); }
       else if (e.key === 'ArrowUp') { if (this.termI > 0) { this.termI--; inp.value = this.termHist[this.termI] || ''; } }
       else if (e.key === 'ArrowDown') { if (this.termI < this.termHist.length) { this.termI++; inp.value = this.termHist[this.termI] || ''; } }
     });
+
+    // 字号：手机竖屏默认给大一点（15px），桌面保持 12.5px。kv 里存过就听 kv 的。
+    this.fs = narrow() ? 15 : 12.5;
+    this.termQs = DEFAULT_QS.slice();
+    if (fsUp) fsUp.onclick = () => { this.fs = Math.min(FS_MAX, this.fs + 1); applyFs(); saveTermPrefs(); };
+    if (fsDown) fsDown.onclick = () => { this.fs = Math.max(FS_MIN, this.fs - 1); applyFs(); saveTermPrefs(); };
+
+    // 软键盘弹出会把视口顶掉一截，把输入框拉回可见处（手机上「贴键盘」）
+    const keepInpVisible = () => {
+      if (document.activeElement !== inp) return;
+      try { inp.scrollIntoView({ block: 'center' }); } catch (_) {}
+    };
+    inp.addEventListener('focus', () => setTimeout(keepInpVisible, 120));
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => setTimeout(keepInpVisible, 60));
+    }
+    // 横竖屏切换 / 窗口拉伸：字号不变，行列数得跟着变
+    window.addEventListener('resize', () => {
+      if (!active()) return;
+      const sz = computeSize();
+      const t = termTarget();
+      if (t) post('/api/term/resize', { sid: t.sid, ...sz }).catch(() => {});
+      const a = active();
+      if (a && a.emu) a.emu.cols = sz.cols;
+      syncUi();
+    });
+
+    paintQuick();
+    applyFs();
+
+    // 常用命令 / 字号存在 kv：读回来再刷一遍（读不到就用上面那套默认）
+    (async () => {
+      try {
+        const [q, f] = await Promise.all([
+          api('/api/kv?k=termQuickCmds'),
+          api('/api/kv?k=' + fsKey()),
+        ]);
+        const arr = JSON.parse((q && q.v) || 'null');
+        if (Array.isArray(arr)) {
+          this.termQs = arr.filter((x) => typeof x === 'string' && x.trim()).slice(0, 24);
+        }
+        const fv = parseFloat((f && f.v) || '');
+        if (fv >= FS_MIN && fv <= FS_MAX) { this.fs = fv; applyFs(); }
+        paintQuick();
+      } catch (_) { /* kv 读不到就用默认 */ }
+    })();
 
     // 首个标签
     openTab();
@@ -769,6 +1018,9 @@ export default {
       if (t.mode === 'interactive' && !t.es) this._attachTab(t);
       else if (t.mode === 'run' && this._startTab && !t.emu) this._startTab(t);
     }
+    // 面板刚由隐藏变可见：字符格重量（藏着的元素量不出宽高），行列数重报给 PTY，
+    // 手机转屏 / 从别的页面回来也顺手重排一遍
+    if (this._termRedraw) this._termRedraw();
   },
 
   commands() {

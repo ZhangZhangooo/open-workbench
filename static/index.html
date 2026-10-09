@@ -2,15 +2,30 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>工作台</title>
 <link rel="stylesheet" href="/static/style.css">
+
+<!-- 装到主屏（PWA）。注意：装成真 App 需要 https 或 localhost 这种安全上下文，
+     手机连 http://192.168.x.x:8777 明文地址时，安卓 Chrome 只会存个书签。
+     想要全屏无地址栏，用设置页里那条 https 隧道地址打开再加主屏。 -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="工作台">
 </head>
 <body>
 
 <div class="shell">
 
   <div class="topstat" id="topstat">
+    <button class="mburger" id="btnMenu" aria-label="打开菜单" title="菜单">
+      <span></span><span></span><span></span>
+    </button>
     <span class="led" title="在线"></span>
     <span class="brand">OPENCLAW <b>▸</b> WORKBENCH</span>
     <span class="ver">v0.9 · local</span>
@@ -49,6 +64,10 @@
       <div id="stage"></div>
     </div>
   </div>
+
+  <!-- 手机端：抽屉遮罩 + 底部 tab 条。桌面上这两个是 display:none，一点不影响 -->
+  <div class="scrim" id="scrim"></div>
+  <nav class="mobar" id="mobar"></nav>
 </div>
 
 <div class="cmdk" id="cmdk">
