@@ -40,6 +40,7 @@ import docsio  # noqa: E402
 import conpty  # noqa: E402
 import wecom as wecommod  # noqa: E402
 import transfer as transfermod  # noqa: E402
+import printers as prntmod  # noqa: E402
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -2399,6 +2400,71 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "cfg": transfermod.cfg(STORE)})
             return
 
+        # ================= 打印机 =================
+        # ⚠️ 打印接口绝对不能进 LOCAL_ONLY_PREFIX：手机/平板连局域网也要能打印。
+        if p == "/api/print/devices":
+            self._json({"ok": True, "devices": prntmod.devices(STORE)})
+            return
+
+        if p == "/api/print/jobs":
+            self._json({"ok": True, "jobs": prntmod.jobs(STORE)})
+            return
+
+        if p == "/api/print/queue":
+            q = parse_qs(u.query)
+            self._json({"ok": True,
+                        "printer": q.get("printer", [""])[0],
+                        "jobs": prntmod.spool_jobs(q.get("printer", [""])[0])})
+            return
+
+        if p == "/api/print/env":
+            self._json({
+                "ok": True,
+                "browser": prntmod.find_browser(),
+                "default_printer": prntmod.default_printer(),
+                "is_win": prntmod.IS_WIN,
+                "stage_dir": prntmod.STAGE,
+                "out_dir": prntmod.OUT,
+                "protocols": {"normal": list(prntmod.PROTOCOLS["normal"]),
+                              "3d": list(prntmod.PROTOCOLS["3d"])},
+            })
+            return
+
+        if p == "/api/print/stage":
+            rows = []
+            for f in os.listdir(prntmod.STAGE):
+                fp = os.path.join(prntmod.STAGE, f)
+                if os.path.isfile(fp):
+                    rows.append({"name": f, "size": os.path.getsize(fp),
+                                 "mtime": os.path.getmtime(fp),
+                                 "ext": os.path.splitext(f)[1].lower()})
+            rows.sort(key=lambda r: -r["mtime"])
+            self._json({"ok": True, "rows": rows[:80], "dir": prntmod.STAGE})
+            return
+
+        if p == "/api/print/preview":
+            # 预览/下载某个已准备好的打印件
+            q = parse_qs(u.query)
+            name = os.path.basename(q.get("name", [""])[0])
+            for base in (prntmod.OUT, prntmod.STAGE):
+                fp = os.path.join(base, name)
+                if os.path.isfile(fp):
+                    # ⚠️ _send_file 的第二个参数是 item dict（transfer 也这么传），
+                    # 传字符串会在取 item["name"] 时 AttributeError，把连接直接掐断。
+                    self._send_file(fp, {"name": name})
+                    return
+            self._json({"ok": False, "error": "找不到这个文件"}, 404)
+            return
+
+        if p == "/api/print/3d/status":
+            q = parse_qs(u.query)
+            dev = prntmod.find_device(STORE, q.get("id", [""])[0])
+            if not dev:
+                self._json({"ok": False, "error": "设备不在了"}, 404)
+                return
+            self._json({"ok": True, "status": prntmod.status_3d(dev)})
+            return
+
         if p == "/api/status":
             self._json({
                 "count": IDX.count(),
@@ -3759,6 +3825,128 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/transfer/cfg/save":
             self._json({"ok": True, "cfg": transfermod.save_cfg(STORE, body)})
+            return
+
+        # ================= 打印机 =================
+        if p == "/api/print/add":
+            self._json({"ok": True, "device": prntmod.add_device(STORE, {
+                "name": (body.get("name") or "").strip(),
+                "kind": body.get("kind") or prntmod.NORMAL_KIND,
+                "proto": (body.get("proto") or "ipp").strip(),
+                "host": (body.get("host") or "").strip(),
+                "port": int(body.get("port") or 631),
+                "api_key": (body.get("api_key") or "").strip(),
+                "tls": bool(body.get("tls", True)),
+                "path": (body.get("path") or "/ipp/print").strip(),
+                "note": (body.get("note") or "").strip(),
+            })})
+            return
+
+        if p == "/api/print/update":
+            d = prntmod.update_device(STORE, body.get("id", ""), body.get("patch") or {})
+            self._json({"ok": bool(d), "device": d})
+            return
+
+        if p == "/api/print/del":
+            self._json({"ok": prntmod.del_device(STORE, body.get("id", ""))})
+            return
+
+        if p == "/api/print/discover":
+            t0 = time.time()
+            found = prntmod.discover_lan(body.get("subnet"),
+                                        timeout=float(body.get("timeout") or 1.2))
+            self._json({"ok": True, "found": found, "dur": round(time.time() - t0, 1)})
+            return
+
+        if p == "/api/print/test":
+            dev = prntmod.find_device(STORE, body.get("id", ""))
+            if not dev:
+                self._json({"ok": False, "error": "设备不在了"})
+                return
+            if dev.get("kind") == prntmod.KIND_3D:
+                self._json(prntmod.test_3d(dev))
+                return
+            if dev.get("proto") == "ipp":
+                self._json(prntmod.ipp_send(dev, None, prntmod.OP_GET_ATTRS, timeout=15))
+                return
+            self._json({"ok": True, "detail": "系统队列可见",
+                        "jobs": prntmod.spool_jobs(dev.get("name", ""))})
+            return
+
+        if p == "/api/print/prepare":
+            # 导入文件 -> 就绪的打印件（PDF 直接用，其它交给浏览器转 PDF）
+            src = (body.get("path") or "").strip()
+            if not src or not os.path.isfile(src):
+                self._json({"ok": False, "error": "文件不存在：" + src})
+                return
+            pdf, msg = prntmod.to_pdf(src)
+            if not pdf:
+                self._json({"ok": False, "error": "转 PDF 失败：" + str(msg)})
+                return
+            self._json({"ok": True, "pdf": pdf, "name": os.path.basename(pdf),
+                        "size": os.path.getsize(pdf), "msg": msg, "src": src,
+                        "ext": os.path.splitext(src)[1].lower()})
+            return
+
+        if p == "/api/print/send":
+            dev = prntmod.find_device(STORE, body.get("printer_id", ""))
+            if not dev:
+                self._json({"ok": False, "error": "设备不在了"})
+                return
+            path = (body.get("path") or "").strip()
+            job = prntmod.add_job(STORE, dev, path, title=body.get("title"))
+            try:
+                r = prntmod.send_to_printer(STORE, dev, path, body.get("opts") or {})
+            except Exception as exc:  # noqa: BLE001
+                r = {"ok": False, "error": repr(exc)}
+            prntmod.update_job(STORE, job["id"],
+                               status="done" if r.get("ok") else "error",
+                               channel=r.get("channel") or "",
+                               detail=str(r.get("error") or r.get("detail") or "")[:300])
+            self._json({"ok": bool(r.get("ok")), "result": r, "job_id": job["id"]})
+            return
+
+        if p == "/api/print/restore-default":
+            self._json(prntmod.close_print_dialog(body.get("printer", "")))
+            return
+
+        if p == "/api/print/3d/control":
+            dev = prntmod.find_device(STORE, body.get("id", ""))
+            if not dev:
+                self._json({"ok": False, "error": "设备不在了"})
+                return
+            self._json(prntmod.control_3d(dev, (body.get("action") or "").strip()))
+            return
+
+        if p == "/api/print/agent":
+            # 让 OpenClaw 干活 -> 产物落到 stage -> 回来只列清单，由人决定印哪张
+            task = (body.get("task") or "").strip()
+            if not task:
+                self._json({"ok": False, "error": "空任务"})
+                return
+            before = prntmod.stage_snapshot()
+            hint = ("\n\n【重要】把最终产物写成一个文件，放到这个目录（本机真实路径）：\n"
+                    + prntmod.STAGE + "\n"
+                    "文件名用有意义的英文或拼音（避免中文名在不同环节出问题）。\n"
+                    "写完在回复里说清文件叫什么。")
+            r = _claw_run_with_retry(task + hint, "", int(body.get("timeout", 240)),
+                                     (body.get("agent") or "").strip(), "")
+            new = prntmod.stage_new(before)
+            try:
+                STORE.openclaw_log("[打印] " + task,
+                                   (r.get("reply") or r.get("error") or "")[:4000],
+                                   bool(r.get("ok")), "run", "", 0, 0)
+            except Exception:  # noqa: BLE001
+                pass
+            self._json({"ok": bool(r.get("ok")), "reply": r.get("reply") or "",
+                        "error": r.get("error") or "",
+                        "produced": [{"name": os.path.basename(f), "path": f,
+                                      "size": os.path.getsize(f)} for f in new]})
+            return
+
+        if p == "/api/print/jobs/clear":
+            prntmod.clear_jobs(STORE)
+            self._json({"ok": True})
             return
 
         if p == "/api/mail/send":
