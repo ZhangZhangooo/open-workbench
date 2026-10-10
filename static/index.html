@@ -90,5 +90,19 @@
 <script src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"></script>
 <script src="/static/cloud.js"></script>
 <script type="module" src="/static/core.js"></script>
+<!-- i18n：语言默认跟随系统（navigator.language），设置页可覆盖并存 localStorage。
+     刻意放在 core.js 之后：i18n.apply() 会扫 DOM + 挂 MutationObserver，
+     所以即便模块是异步渲染出来的，后续新增节点也会被翻译到。 -->
+<script type="module">
+  import i18n from '/static/i18n.js';
+  window.WBi18n = i18n;
+  try {
+    await i18n.load();
+    i18n.apply();
+  } catch (e) {
+    // 语言包加载失败绝不能影响主应用，直接退回中文
+    console.warn('[i18n] 加载失败，继续用中文', e);
+  }
+</script>
 </body>
 </html>
