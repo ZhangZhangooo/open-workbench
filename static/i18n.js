@@ -89,11 +89,17 @@ const ORIG = 'data-wb-zh';
 function swapText(node) {
   const raw = node.nodeValue;
   if (!raw) return;
-  const zh = node[ORIG] != null ? node[ORIG] : raw;
-  const trimmed = zh.trim();
+  // ⚠️ 第一次碰到这个节点时**必须把中文原文存进 expando**（node[ORIG]）。
+  //    只读不写的话，第二遍扫描拿到的"原文"已经是英文，
+  //    含中文判断直接 return —— 表现为「切到英文能翻，切回中文永远翻不回来」（踩过）。
+  let zh = node[ORIG];
+  if (zh == null) {
+    if (!/[\u4e00-\u9fff]/.test(raw)) return;    // 本来就没中文，不用记
+    zh = raw;
+    node[ORIG] = raw;
+  }
+  const trimmed = String(zh).trim();
   if (!trimmed) return;
-  // 整段精确匹配才翻；一整段里只含标点的（"·"）之类不动
-  if (!/[\u4e00-\u9fff]/.test(trimmed)) return;
   const out = t(zh);
   if (out !== raw) node.nodeValue = out;
 }
@@ -101,18 +107,22 @@ function swapText(node) {
 const ATTRS = ['placeholder', 'title', 'aria-label', 'alt', 'data-empty'];
 
 function swapAttrs(el) {
-  if (el[ORIG] == null) {
-    el[ORIG] = '';                       // 标记已处理
-  }
+  // 语言切换按钮自己管显示，别让它的 title 走翻译（会叠加成两遍）
+  if (el.hasAttribute('data-wb-lang')) return;
   for (const a of ATTRS) {
     if (!el.hasAttribute(a)) continue;
     const key = ORIG + '-' + a;
-    if (el[key] != null) continue;
-    const v = el.getAttribute(a);
-    if (!v || !/[\u4e00-\u9fff]/.test(v)) continue;
-    el[key] = v;
-    const nv = t(v);
-    if (nv !== v) el.setAttribute(a, nv);
+    let orig = el[key];
+    if (orig == null) {
+      orig = el.getAttribute(a);
+      // 没有中文的属性（图标 alt 之类）不值得存，每次重扫时直接跳过
+      if (!orig || !/[\u4e00-\u9fff]/.test(orig)) continue;
+      el[key] = orig;
+    }
+    // ⚠️ 别写成「el[key] 存过就 continue」——那样从英文切回中文时属性永远停在英文
+    //（文本节点走 swapText 能还原，属性不能，这是真踩过的坑）
+    const want = t(orig);
+    if (el.getAttribute(a) !== want) el.setAttribute(a, want);
   }
 }
 
@@ -159,10 +169,52 @@ function apply(lang, root) {
   // 让模块自己有机会重绘（badge、时钟这类不是静态文本）
   try {
     const wb = window.WB;
-    if (wb && Array.isArray(wb.modules) && typeof wb.rerender === 'function') wb.rerender();
+    if (wb && typeof wb.rerender === 'function') wb.rerender();
   } catch (e) { /* 忽略 */ }
   try { window.dispatchEvent(new CustomEvent('wb:lang', { detail: current })); } catch (e) { /* 忽略 */ }
+  paintSwitchers();
   return current;
+}
+
+/** 回到「跟随系统」：清掉本地覆盖，重新按 navigator 判断 */
+function follow() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* 忽略 */ }
+  return apply(null);
+}
+
+/** 在支持的语言之间轮换（顶栏那个按钮用） */
+function toggle() {
+  return apply(current === 'zh' ? 'en' : 'zh');
+}
+
+/* ---------- 切换入口的自我显示 ----------
+   按钮上要写「当前是什么语言」，但这段文字/提示本身不能被翻译器再翻一遍：
+   swapAttrs 只认 data-wb-zh-* 这类属性，看不见 data-wb-lang，所以 title 会被
+   当成待译文案处理，出现「…（点击切换到 English）（点击切换）」这种叠加（踩过）。
+   所以带 data-wb-lang 的元素在 swapAttrs 里整个跳过。 */
+
+const LABELS = { zh: 'ZH', en: 'EN' };
+const TITLES = {
+  zh: '界面语言：中文（点击切换到 English）',
+  en: 'Interface language: English (click to switch to 中文)',
+};
+
+function paintSwitchers() {
+  document.querySelectorAll('[data-wb-lang]').forEach((b) => {
+    b.classList.toggle('on', b.dataset.wbLang === current);
+    b.textContent = LABELS[current] || current;
+    b.title = TITLES[current] || current;
+  });
+}
+
+/** 语言包词条统计（设置页显示进度用） */
+function stats() {
+  const out = {};
+  for (const l of SUPPORTED) out[l] = Object.keys(PACKS[l] || {}).length;
+  // 覆盖率以中文包为分母（中文是恒等的，条数 = 应翻总数）
+  const base = out.zh || 0;
+  out.pct = base ? Math.round(((out.en || 0) / base) * 100) : 0;
+  return out;
 }
 
 const api = {
@@ -170,9 +222,14 @@ const api = {
   t,
   renderPattern,
   apply,
+  follow,
+  toggle,
   detect,
+  stats,
+  paintSwitchers,
   get lang() { return current; },
   get supported() { return SUPPORTED.slice(); },
+  LABELS,
   STORAGE_KEY,
 };
 

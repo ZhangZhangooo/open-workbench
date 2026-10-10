@@ -1784,6 +1784,17 @@ body:not(.light) .room-svg .room-bg { fill: #20211f; }
 }
 .topstat .kicon:hover { background: var(--hover); color: var(--accent); }
 
+/* 语言切换器：顶栏和侧栏底部各一个，纯文字不吃翻译 */
+.topstat [data-wb-lang],
+.side-foot [data-wb-lang] {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .5px;
+  cursor: pointer;
+  user-select: none;
+}
+.side-foot [data-wb-lang] { padding: 6px 4px; }
+.topstat [data-wb-lang] { min-width: 34px; text-align: center; }
+
 .side-lbl {
   font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
   color: var(--ink-3); padding: 8px 10px 4px;

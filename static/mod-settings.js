@@ -12,6 +12,24 @@ export default {
     el.innerHTML = `
       <div class="stack">
         <div class="panel">
+          <h3>界面语言</h3>
+          <div class="note" style="margin-bottom:12px">
+            默认<b>跟随系统</b>：系统语言是英文就显示英文，不用自己设。
+            顶栏右上角也有一个 <b>ZH / EN</b> 按钮，点一下就切，切完立刻生效、记住选择。
+            没翻译到的部分仍显示中文（不会变空白），语言包在随项目一起走。
+          </div>
+          <div class="field"><label>当前语言</label>
+            <div id="langNow" class="note" style="line-height:24px">读取中…</div>
+          </div>
+          <div class="field-row" style="margin-top:4px">
+            <button class="btn" id="btnLangZh">中文</button>
+            <button class="btn" id="btnLangEn">English</button>
+            <button class="btn" id="btnLangAuto">跟随系统</button>
+          </div>
+          <div class="note" style="margin-top:10px" id="langInfo"></div>
+        </div>
+
+        <div class="panel">
           <h3>AI 接口</h3>
           <div class="note" style="margin-bottom:12px">
             OpenAI 兼容格式即可。Ollama 云端填 https://ollama.com/v1，本机 Ollama 填 http://localhost:11434/v1。
@@ -240,6 +258,11 @@ export default {
           <div id="counts" class="note"></div>
         </div>
       </div>`;
+
+    /* ---- 界面语言：切换 / 跟随系统 ---- */
+    el.querySelector('#btnLangZh').addEventListener('click', () => this.setLang('zh'));
+    el.querySelector('#btnLangEn').addEventListener('click', () => this.setLang('en'));
+    el.querySelector('#btnLangAuto').addEventListener('click', () => this.setLang(null));
 
     el.querySelector('#btnSaveAI').addEventListener('click', async () => {
       const key = el.querySelector('#sKey').value;
@@ -984,7 +1007,47 @@ export default {
         : `<span class="tag err">不能看图</span> ${esc(d.note)}`);
   },
 
+  /* ---- 界面语言 ---- */
+  setLang(lang) {
+    const i = window.WBi18n;
+    if (!i) { toast('语言包还在加载，刷新一下再来'); return; }
+    if (lang) i.apply(lang);
+    else i.follow();
+    i.paintSwitchers();
+    // 当前页重画，让这一页的文案立刻换成新语言（不重画的话只有已渲染的节点变了）
+    const cur = document.querySelector('.mod.on');
+    const id = window.__cur;
+    const mod = (window.WB.modules || []).find((m) => m.id === id);
+    if (mod && mod.onShow) { try { mod.onShow(); } catch (e) { console.error('[lang]', e); } }
+    void cur;
+    this.sync();
+    const info = this.el.querySelector('#langInfo');
+    if (info) {
+      info.textContent = lang
+        ? `已固定为${lang === 'zh' ? '中文' : 'English'}，刷新和下次打开都保持。`
+        : `已恢复跟随系统（当前系统是 ${i.lang === 'zh' ? '中文' : 'English'}）。`;
+    }
+    toast(lang ? (lang === 'zh' ? '已切到中文' : 'Switched to English') : '已跟随系统语言');
+  },
+
+  paintLang() {
+    const el = this.el;
+    if (!el || !el.querySelector('#langNow')) return;
+    const i = window.WBi18n;
+    const box = el.querySelector('#langNow');
+    if (!i) { box.textContent = '语言包还在加载…'; return; }
+    const saved = (() => { try { return localStorage.getItem(i.STORAGE_KEY); } catch (e) { return null; } })();
+    const sys = (navigator.languages || [navigator.language || 'zh-CN'])[0] || '?';
+    const name = (l) => (i.LABELS && i.LABELS[l]) || l;
+    const st = i.stats() || {};
+    box.innerHTML = `现在显示 <b>${name(i.lang)}</b> · 支持 ${(i.supported || []).map(name).join(' / ') || '—'}`
+      + `<br>模式：${saved ? '<b>手动指定</b>' : '<b>跟随系统</b>'} · 系统语言 <code>${esc(sys)}</code>`
+      + `<br>词条：中文 ${st.zh || 0} 条，已译 ${st.en || 0} 条（${st.pct || 0}%）`
+      + `<br>顶栏右上角的 <b>ZH / EN</b> 按钮可以随时一键切。`;
+  },
+
   sync() {
+    this.paintLang();
     const s = window.WB.status();
     if (!s) return;
     const el = this.el;

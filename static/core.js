@@ -137,6 +137,14 @@ window.WB = {
   requestNotify,
   applyModuleCfg: (cfg) => applyModuleCfg(cfg),
   readModuleCfg: () => JSON.parse(JSON.stringify(moduleCfg)),
+  // i18n 切换语言后调它：侧栏 / 底栏 / 顶栏标题都是 JS 现拼的，
+  // innerHTML 重建出来的是硬编码中文，得重新走一遍 apply 才译得到。
+  rerender: () => {
+    renderSide();
+    renderMobar();
+    const m = MODULES.find((x) => x.id === currentId);
+    if (m) $('#topTitle').textContent = modLabel(m);
+  },
   // 手机底栏那 4 个位子也让设置页能改（存 kv mobileTabs）
   readMobileTabs: () => mobileTabs.slice(),
   setMobileTabs: (arr) => {
@@ -472,6 +480,22 @@ let cmdTimer = null;
 async function updateCmd(q) {
   const items = [];
 
+  // 语言切换永远排在最前（命令面板默认空查询，这里就是全部）
+  items.push({
+    title: window.WBi18n && window.WBi18n.lang === 'zh' ? '切换到 English（Ctrl/⌘ L）' : '切换到中文（Ctrl/⌘ L）',
+    hint: '界面语言',
+    run: () => {
+      const i = i18nApi();
+      if (!i) { toast('语言包还在加载，刷新一下再来'); return; }
+      return setLang(i.lang === 'zh' ? 'en' : 'zh');
+    },
+  });
+  items.push({
+    title: '界面语言设置',
+    hint: '设置',
+    run: () => go('settings'),
+  });
+
   visibleModules().forEach((m) => {
     const label = modLabel(m);
     if (!q || label.includes(q) || (m.name && m.name.includes(q))) {
@@ -651,6 +675,14 @@ window.addEventListener('keydown', (e) => {
     $('#cmdk').classList.contains('on') ? closeCmd() : openCmd();
     return;
   }
+  // Ctrl/⌘+L 切界面语言（浏览器地址栏那个 Ctrl+L 要 preventDefault 才抢得到）
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l') {
+    e.preventDefault();
+    const i = i18nApi();
+    if (!i) { toast('语言包还在加载，刷新一下再来'); return; }
+    setLang(i.lang === 'zh' ? 'en' : 'zh');
+    return;
+  }
   if (e.key === 'Escape' && $('#cmdk').classList.contains('on')) {
     closeCmd();
     return;
@@ -677,6 +709,48 @@ $('#btnTheme').onclick = async () => {
   const light = document.body.classList.toggle('light');
   await post('/api/kv/set', { k: 'theme', v: light ? 'light' : 'dark' });
 };
+
+/* ---------- 语言切换 ----------
+   i18n.js 是异步 module，加载完才把 window.WBi18n 挂上，所以这里不能直接引用。
+   点击时才取，取不到就提示「语言包还在加载」而不是静默失败。 */
+
+function i18nApi() {
+  return window.WBi18n || null;
+}
+
+async function setLang(lang) {
+  const i = i18nApi();
+  if (!i) { toast('语言包还在加载，刷新一下再来'); return; }
+  if (lang) i.apply(lang);
+  else i.follow();
+  i.paintSwitchers();
+  // 当前模块的内容得重画一次，否则新语言只作用在已渲染的节点上
+  const e = currentId ? built.get(currentId) : null;
+  if (e && e.mod && e.mod.onShow) {
+    try { e.mod.onShow(); } catch (err) { console.error('[lang] 重画失败', err); }
+  }
+  toast('界面语言：' + ((i.LABELS && i.LABELS[i.lang]) || i.lang));
+}
+
+const btnLang = $('#btnLang');
+const btnLang2 = $('#btnLang2');
+[btnLang, btnLang2].forEach((b) => {
+  if (!b) return;
+  b.onclick = () => {
+    const i = i18nApi();
+    if (!i) { toast('语言包还在加载，刷新一下再来'); return; }
+    setLang(i.lang === 'zh' ? 'en' : 'zh');
+  };
+});
+if (btnLang || btnLang2) {
+  // i18n 加载完会自己 paint 一次；这里再兜一次底（加载失败时至少按钮还在）
+  const wait = setInterval(() => {
+    if (!i18nApi()) return;
+    clearInterval(wait);
+    i18nApi().paintSwitchers();
+  }, 200);
+  setTimeout(() => clearInterval(wait), 8000);
+}
 
 /* ---------- 状态轮询 ---------- */
 
