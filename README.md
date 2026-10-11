@@ -1,5 +1,7 @@
 # OpenWorkbench
 
+[![封面](docs/cover.png)](docs/cover.png)
+
 **[English](README.en.md)**
 
 **让 AI 主动来找你，而不是你一直去问它。**

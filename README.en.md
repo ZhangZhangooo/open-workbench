@@ -1,5 +1,7 @@
 # OpenWorkbench
 
+[![Cover](docs/cover-en.png)](docs/cover-en.png)
+
 **Let the AI come to you, instead of you always asking it.**
 
 Before you've looked at your phone in the morning, it's already picked out the emails that
