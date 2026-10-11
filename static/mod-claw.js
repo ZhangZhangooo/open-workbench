@@ -1,5 +1,7 @@
 /* OpenClaw：独立对话窗口。任务是阻塞式的，所以要显示等待计时。 */
 
+import { AUTO_TASKS } from './auto-tasks.js';
+
 const { api, post, toast, esc } = window.WB;
 
 const KEY = 'wb_claw_history';
@@ -413,9 +415,67 @@ export default {
       <div class="cap-sec">
         <div class="cap-h">定时任务</div>
         <div id="cronBox"><button class="btn" id="btnCron" style="height:28px;padding:0 10px;font-size:12px">查一下</button></div>
+      </div>
+      <div class="cap-sec">
+        <div class="cap-h">工作台后台自动化</div>
+        <div id="autoBox"><div class="note">读取中…</div></div>
       </div>`;
 
     box.querySelector('#btnCron').onclick = () => this.loadCron();
+    this.loadAuto();
+  },
+
+  /* ---- 后台自动化：MCP 工具装没装好 + 预置任务开没开 ---- */
+
+  async loadAuto() {
+    const box = this.el.querySelector('#autoBox');
+    if (!box) return;
+    box.innerHTML = '<div class="note">读取中…</div>';
+    let st = { ok: false };
+    try { st = await api('/api/claw/mcp'); } catch (_) { /* 下面统一兜 */ }
+    const mcp = st.mcp || {};
+    const badge = mcp.installed
+      ? `<span class="tag ok">MCP 已挂载（${esc(mcp.name)}）</span>`
+      : `<span class="tag warn">MCP 没挂上，OpenClaw 还看不到工作台工具</span>`;
+    const toolCount = mcp.tools ? ` · ${mcp.tools} 个工具` : '';
+
+    let tasks = [];
+    try {
+      const r = await api('/api/claw/automations');
+      const live = (r.raw || '');
+      tasks = (AUTO_TASKS || []).map((t) => ({
+        ...t,
+        registered: live.indexOf(t.name) >= 0 || live.indexOf(t.id) >= 0,
+      }));
+    } catch (_) { /* 读不到就只显示未注册 */ }
+
+    box.innerHTML = `
+      <div class="cap-row">${badge}${toolCount}</div>
+      <div class="note" style="margin:6px 0 10px">
+        底层工具是 <code>workbench/wb_mcp.py</code>：把工作台的读邮件、写待办、存资料
+        注册成 MCP 标准工具，OpenClaw 是<b>直接调工具</b>，不是照着提示词猜 URL。
+        写操作一律走「待审队列」，你点确认才真的执行。
+      </div>
+      ${tasks.length ? tasks.map((t) => `
+        <div class="cap-row">
+          <b>${esc(t.name)}</b>
+          ${t.registered ? '<span class="tag ok">已注册</span>' : '<span class="tag">未注册</span>'}
+          <span class="note">${esc(t.cron)}</span>
+          <button class="btn" style="height:26px;padding:0 9px;font-size:12px"
+            data-autotask="${esc(t.id)}">${t.registered ? '查运行记录' : '看怎么做'}</button>
+        </div>`).join('') : '<div class="note">没有预置任务</div>'}
+      <div class="note" style="margin-top:8px" id="autoInfo"></div>`;
+
+    box.querySelectorAll('[data-autotask]').forEach((b) => {
+      b.onclick = () => this.showAutoTask(b.dataset.autotask);
+    });
+  },
+
+  showAutoTask(id) {
+    const t = (AUTO_TASKS || []).find((x) => x.id === id);
+    const info = this.el.querySelector('#autoInfo');
+    if (!t || !info) return;
+    info.innerHTML = `<div class="cap-raw">${esc(t.prompt)}</div>`;
   },
 
   async loadCron() {

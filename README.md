@@ -1,10 +1,80 @@
 # OpenWorkbench
 
-**一句话**：把你本机的 Ollama、OpenClaw、文件、终端、系统状态，接进一个**零第三方依赖**的本地工作台 —— 数据全程不出你的机器。
+**[English](README.en.md)**
 
-它不是另一个云面板。前端后端一体（`server.py` 既托管页面又处理 API），
-只用 Python 标准库，`pip install` 什么都不用装。每个人跑自己的实例、
-连自己本机的模型、各自做内网穿透 —— 这是「开源回环」的起点。
+**让 AI 主动来找你，而不是你一直去问它。**
+
+早上你还没看手机，它已经把今天要紧的邮件挑出来放好了 —— 需要你回的那几封，
+回复草稿写好了等你点确认。你在微信里发一句「把这个打出来」，纸就出来了。
+手机拍的照片，电脑上直接就有。
+
+它把你**本机**的 Ollama、OpenClaw、文件、终端、邮件、打印机接进一个界面，
+**零第三方依赖**（只用 Python 标准库，`pip install` 什么都不用装），数据全程不出你的机器。
+
+```bash
+git clone https://github.com/ZhangZhangooo/open-workbench
+cd open-workbench
+python server.py 8777        # → http://127.0.0.1:8777
+```
+
+**Windows 直接双击 `start.bat` 就行**（自动起服务 + 开浏览器 + 崩溃自动重启）。
+
+需要 Ollama / OpenClaw 的话有一键脚本，但**那一步可以晚点做** ——
+先把界面跑起来看看，模型的事不着急。
+
+<details>
+<summary><b>不想自己装 Ollama / OpenClaw？</b>（点开看一键脚本）</summary>
+
+| 系统 | 命令 |
+| --- | --- |
+| Windows | `powershell -ExecutionPolicy Bypass -File install.ps1` |
+| macOS / Linux | `sudo ./install.sh` |
+
+脚本会：装/起 Ollama → 拉对话模型 `gpt-oss:120b-cloud` 和看图模型 `gemma4:31b-cloud`
+→ 装 OpenClaw → 生成 `config.json` 指向你本机的 Ollama。
+默认每一步都把命令打出来等你按回车；加 `-Yes` / `--yes` 就全自动。
+
+**绝不覆盖你已有的 `config.json`** —— 先备份成 `config.json.bak.<时间戳>`，
+且只在「没配过」或「还是出厂默认值」时才改。
+
+> 那两个模型是 Ollama **云端**模型，只有几百字节的代理壳、不下权重，拉起来是秒级的。
+> 想跑纯离线本地模型，自己 `ollama pull qwen2.5:7b` 之类即可。
+
+**macOS / Linux 必须在项目目录下执行，且必须带 `./`**（当前目录 `.` 不在 `$PATH` 里，
+直接敲 `install.sh` 会报 `command not found`）：
+
+```bash
+sudo ./install.sh               # 推荐：整体以 root 跑，脚本内部会把 brew/ollama 降回你本人
+chmod +x ./install.sh && sudo ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
+```
+
+**为什么整个脚本 sudo、而不是只在某几步 sudo**：mac 上装 Ollama / Node / OpenClaw 几乎每步都要权限，
+整体 sudo 一次最省事。但 `brew` 与 `ollama` 必须降回你本人执行 ——
+
+- **brew 直接拒绝以 root 运行**（`Running Homebrew as root is extremely dangerous`），脚本用 `sudo -u <你> brew …` 代你跑；
+- **ollama 的模型要落在你自己的家目录**，以 root 跑 `ollama pull` 会下进 `/root/.ollama`，
+  你日常跑的 ollama 反而看不到、也写不进。
+
+脚本的正确姿势是：**以 root 运行整个脚本，brew / ollama / openclaw / npm 全部以你的身份执行；
+只有 `apt`、官方 Ollama 安装脚本写 `/usr/local`、以及收尾 chown 才用 root**，
+而且默认会先把每条命令打出来等你按回车。脚本是 root，所以生成的 `config.json`、`data/`、
+`~/.ollama` 会先归 root，收尾时**还给你自己**。
+
+**OpenClaw 是特例**：Homebrew 里的 openclaw 是 **cask**（只装 `/Applications/OpenClaw.app`，
+不含命令行），而工作台要连 gateway 必须有 CLI。所以脚本在装完客户端后还会继续装命令行，
+优先走官方脚本 `curl -fsSL https://openclaw.ai/install.sh | bash`，不行才
+`npm install -g openclaw@latest --allow-scripts=openclaw`。最后用
+`ollama launch openclaw --model gpt-oss:120b-cloud -y` 把它拉起来 ——
+这一步**不接入任何渠道**，想接的话自己跑 `openclaw onboard`。
+
+这步通常要 **1~3 分钟**，中间屏幕可能长时间只有一条进度条 —— 那不是卡住。
+超过 5 分钟完全没动静，多半是 npm 源慢，可以先 `npm config set registry https://registry.npmmirror.com` 再重跑。
+
+**Windows 报「文件未经数字签名」**：下载的 `.ps1` 会带「来自 Internet」标记被拦，三种解法任选：
+① 用上面带 `-ExecutionPolicy Bypass` 的命令；② 先 `Unblock-File install.ps1` 再跑；
+③ 把 `install.ps1` **存到本机盘**（如 D 盘）再跑 —— 本地盘不带这个标记。
+
+</details>
 
 ## 长什么样
 
@@ -12,7 +82,7 @@
 | --- | --- |
 | ![客厅仪表盘](docs/screenshots/home.png) | ![项目看板](docs/screenshots/projects.png) |
 
-| 功能全景（9 域 41 项） | 小工具 |
+| 功能全景 | 小工具 |
 | --- | --- |
 | ![功能全景](docs/screenshots/features.png) | ![小工具](docs/screenshots/tools.png) |
 
@@ -20,150 +90,70 @@
 
 ---
 
-## 一键装好环境（新用户先看这里）
+## 它能替你干什么
 
-开源项目最大的坎不是代码，是"clone 下来还要手填配置才能跑"。所以给了两个脚本：
-**装 Ollama、装 OpenClaw、拉模型、并把 `config.json` 自动指向你本机的 Ollama**。
-
-| 系统 | 命令（在项目目录下执行） |
+| 你说 | 它做 |
 | --- | --- |
-| Windows | `powershell -ExecutionPolicy Bypass -File install.ps1` |
-| macOS / Linux | `sudo ./install.sh` |
+| 早上还没看手机 | 定时挑出今天要紧的邮件、写好需要回的草稿，等你点确认 |
+| 在微信里发「把附件打出来」 | 唤起打印，纸就出来了（打印机自动发现，`/api/print/*`） |
+| 在手机上传一张照片 | 电脑收件箱里立刻就有，**原图直传不重编码**（EXIF 完整） |
+| 「这周还有啥没做完」 | 读今日待办，逐条说下一步 |
+| 「把这个存起来」 | 写进知识库 / 随手记 / 项目，都走待审队列，你点确认才落库 |
 
-想全自动、不再逐步确认：`powershell -ExecutionPolicy Bypass -File install.ps1 -Yes` / `sudo ./install.sh --yes`
+---
 
-### macOS / Linux：怎么跑（需要 root / sudo）
-
-```bash
-sudo ./install.sh               # 推荐：整体以 root 跑，脚本内部会把 brew/ollama 降回你本人
-chmod +x ./install.sh && sudo ./install.sh   # 想用 ./ 这种写法就先赋一次执行权
-```
-
-> ⚠️ **必须带 `./`（或完整路径）**：当前目录 `.` 不在 `$PATH` 里，直接敲 `install.sh` 会报
-> `command not found: install.sh`。所以运行写 `./install.sh`（或 `/绝对路径/install.sh`），
-> `chmod` 也一样写 `./install.sh`。
->
-> 从 Git clone 下来的 `install.sh` 已经带执行位，理论上 `sudo ./install.sh` 就能跑；
-> 如果报 `Permission denied`，补一次 `chmod +x ./install.sh` 即可。
->
-> **不是 root 也能跑**：脚本检测到当前不是 root 会自动 `sudo` 重新以 root 运行自己（保留你传的 `--yes` 等参数）；
-> 你也可以在跑之前自己先 `sudo`。
-
-**为什么是整个脚本 sudo、而不是只在某几步 sudo：** mac 上装 Ollama / Node / OpenClaw 几乎每步都要权限，
-整体 sudo 一次最省事。但 `brew` 与 `ollama` 必须降回你本人执行：
-
-- **brew 直接拒绝以 root 运行**（`Running Homebrew as root is extremely dangerous`），所以脚本用 `sudo -u <你> brew …` 代你跑；
-- **ollama 的模型要落在你自己的家目录**，以 root 跑 `ollama pull` 会下进 `/root/.ollama`，你日常跑的 ollama 反而看不到、也写不进。
-
-脚本的正确姿势是：**以 root 运行整个脚本，brew / ollama / openclaw / npm 全部以你的身份执行；只有 `apt`、官方 Ollama 安装脚本写 `/usr/local`、以及收尾 chown 才用 root**，
-而且默认会先把每条命令打出来等你按回车。没装 `sudo` 时脚本会要求你以 root 重跑。
-
-### mac 上默认走 Homebrew（脚本内部以你的身份跑）
-
-检测到装了 Homebrew 时，脚本会这样装 —— 它用 `sudo -u <你>` 代你执行，brew 的目录（`Apple Silicon` 上是 `/opt/homebrew`）归你
-自己的用户，所以 brew 这块全程不会用 root：
-
-```bash
-sudo -u <你> brew install ollama && sudo -u <你> brew services start ollama   # 后者会注册成开机自启
-sudo -u <你> brew install node                                    # npm 全局目录落在 brew 下，归你自己
-```
-
-没有 brew 时才会退回官方安装脚本（以 root 写 `/usr/local`）。
-
-> **整个脚本以 root 运行时，brew / ollama / npm 的安装命令都「以你的身份」执行**（`ollama pull`、`npm install -g`、官方安装脚本都是），
-> 免去你一步步卡权限，也保证模型和 CLI 都落在你的家目录。
-> 同理，`ollama launch openclaw` 也以你的身份跑（以 root 启动 GUI 会留下一堆 root 属主、且你自己的 ollama 看不到）。
->
-> 脚本是 root，所以生成的 `config.json`、`data/`、`~/.ollama` 会先归 root，收尾时**还给你自己** ——
-> 不然之后工作台改不动配置、ollama 也写不进模型目录。
-
-### Windows：怎么跑
-
-```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1
-# 全自动、不再逐步确认：
-powershell -ExecutionPolicy Bypass -File install.ps1 -Yes
-```
-
-> ⚠️ **报「文件未经数字签名 / 不安全」怎么办**：从网上下载的 `.ps1` 会带一个「来自 Internet」的标记，
-> Windows / PowerShell 据此把它当成不受信任的脚本拦下来。三种解法任选其一：
-> 1. 直接用上面带 `-ExecutionPolicy Bypass` 的命令跑（这条就是为绕过签名 / 执行策略检查准备的）；
-> 2. 先清掉下载标记：在 PowerShell 里跑 `Unblock-File install.ps1`，再正常执行；
-> 3. 把 `install.ps1` **存到本机盘**（比如 D: 盘的一个文件夹）再跑 —— 本地盘不带「Internet」标记，就不会被拦。
->
-> 公司 / 学校机器若用组策略强制了更严的执行策略，第 1 种可能仍被拦，用第 2 或第 3 种。
-
-### OpenClaw 怎么装（它是特例）
-
-**Homebrew 里确实有 openclaw**，但它在 **cask** 里（不是 formula，所以 `brew install openclaw`
-装的是 macOS 客户端）：
-
-```bash
-brew install --cask openclaw      # 装 /Applications/OpenClaw.app，要求 macOS 15+
-```
-
-⚠️ **cask 只装 GUI 客户端，不含命令行工具**。而工作台要连 gateway（`openclaw gateway run --port 18789`）
-必须有 CLI，所以脚本在装完客户端后还会继续装命令行，顺序是：
-
-1. 官方安装脚本 `curl -fsSL https://openclaw.ai/install.sh | bash` —— **官方主推**，
-   它会自己准备 Node 运行时，完全绕开 npm 目录权限问题
-2. 上面不行才走 npm：`npm install -g openclaw@latest --allow-scripts=openclaw`
-   （`--allow-scripts=openclaw` 是官方要求的，不加 lifecycle 脚本不跑、装出来是残缺的）
-
-走 npm 时如果全局目录不可写（官方 Node 安装包把 `/usr/local` 给了 root），脚本有两条出路：
-**先用 brew 装 Node**（全局目录归你自己）；不行再改成用户级的 `~/.npm-global`
-（npm 官方推荐的做法，之后你**所有** `npm -g` 都不再需要 sudo），并把该目录追加进 shell 配置。
-
-装好之后脚本会多做一步（4.5）—— 用 Ollama 把 OpenClaw 拉起来，并指定对话模型：
-
-```bash
-ollama launch openclaw --model gpt-oss:120b-cloud -y
-```
-
-这一步**不会接入任何渠道**（微信 / 钉钉 / 邮件等都不接），想接的话自己跑 `openclaw onboard`。
-另外它会打开 OpenClaw 等你操作，所以 `-Yes` / `--yes` 全自动模式下脚本**只打印命令不自动执行**
-（免得在 CI 里卡住），你手动跑那一条即可。
-
-这步通常要 **1~3 分钟**，中间屏幕可能长时间只有一条进度条 —— 那不是卡住。
-如果超过 5 分钟完全没动静，多半是连 npm 官方源慢，可以先换镜像再重跑：
-
-```bash
-npm config set registry https://registry.npmmirror.com
-```
-
-**脚本会做的**：检查 Python 3.8+ → 装/起 Ollama → 拉 `gpt-oss:120b-cloud`（对话）和
-`gemma4:31b-cloud`（看图 / OCR）→ 装 OpenClaw → 生成 `config.json` 指向本机 Ollama。
-
-**脚本明确不会做的**：
-- **不静默跑远程安装脚本**（默认每一步都把命令打出来、等你按回车；`-Yes` 才自动）
-- **绝不覆盖你已有的 `config.json`** —— 先备份成 `config.json.bak.<时间戳>`，
-  且只在「没配过」或「还是出厂默认值」时才改，你自己填过的接口一律不动
-
-> 那两个模型是 Ollama **云端**模型，只有几百字节的代理壳、不下权重，所以拉起来是秒级的。
-> 想跑纯离线本地模型，自己 `ollama pull qwen2.5:7b` 之类即可。
-
-## 快速开始（环境已就绪）
+## 快速开始（Ollama / OpenClaw 已就绪）
 
 ```bash
 python server.py 8777
 # 浏览器打开 http://127.0.0.1:8777
 ```
 
-Windows 也可以直接**双击 `start_workbench.bat`**（会自动起服务并开浏览器，
-且带崩溃自动重启）。配置按需填，模板见 `config.example.json`。
+Windows 直接**双击 `start.bat`**（自动起服务 + 开浏览器 + 崩溃自动重启，
+启动前会精准清掉残留实例，不会像手点那样留着旧进程占着端口）。
+配置按需填，模板见 `config.example.json`。
 
 ## 特性
 
-- **零依赖**：只用 Python 标准库，没有 requirements.txt。
+**跑起来很轻**
+
+- **零第三方依赖**：只用 Python 标准库，**没有 requirements.txt**，`pip install` 什么都不用装。
 - **前端后端一体**：`server.py` 既托管 `static/` 前端，又处理 `/api/*` 后端。
-- **问一问**：接 Ollama 兼容接口的多模型对话，支持多模型对比、自动剥离推理模型的思考过程。
-- **OpenClaw**：神经桥、技能库（可在线下载安装）、结果回写。
-- **本机能力**：文件索引与语义搜索、内置 ConPTY 真终端、系统状态监控。
-- **模块**：项目 / 资料 / 日历 / 邮件 / 笔记 / 习惯 / 番茄钟 / 剪贴板 / 房间布置 等 20+ 个。
-- **连接器框架**：外接通道按统一契约拼入（PushPlus、Server酱、企业微信、Webhook、SMTP），可把结果推到微信 / 邮箱 / 任意 HTTP 端点。
-- **微信双向**：企业微信自建应用 + 「微信插件」，让你在**普通微信**的聊天框里直接指挥工作台 —— 发一句话，它干活，结果发回同一个框。官方合规通道，不碰逆向协议。
+- **真终端**：内置 ConPTY（Windows），不是网页里仿的那种假 shell。
 - **数据在自己机器**：落在 `data/app.db`，可导出备份。
-- **自托管 / 远程访问**：配合内网穿透 + `remote.access_key`，手机 / 外网也能访问你自己的本机。
+
+**它替你干活，不只是等你问**
+
+- **定时自动化**：早间邮件简报、今日回顾、每周回顾等任务，用 OpenClaw 自己的 cron 排期。
+- **MCP 标准接口**：`wb_mcp.py` 把「读邮件 / 加待办 / 存资料 / 查状态」注册成 MCP 工具，
+  `openclaw mcp add` 一挂，**OpenClaw 直接调工具**，不是照着提示词猜 URL。
+- **微信双向**：企业微信自建应用 + 「微信插件」，让你在**普通微信**的聊天框里直接指挥它 ——
+  发一句话，它干活，结果发回同一个框。官方合规通道，不碰逆向协议。
+- **连接器框架**：PushPlus / Server酱 / 企业微信 / Webhook / SMTP，结果能推到微信、邮箱、任意 HTTP 端点。
+
+**你手上有的东西都能接进来**
+
+- **25 个可配置模块**：今日 / 任务 / 文件 / OpenClaw / 技能库 / 日历 / 会议 / 邮件 / 项目 / 笔记 /
+  资料库 / 系统 / 设置 / 生活 / 房间 / 番茄钟 / 习惯 / 剪贴板 / 提醒 / 日志 / 小工具 /
+  系统工具 / 功能清单 / **互传** / **打印机**。每个都能单独开关、改名、调顺序。
+- **问一问**：接 Ollama 兼容接口的多模型对话，支持多模型对比、自动剥离推理模型的思考过程。
+- **打印**：普通打印机自动发现（Windows 队列 + IPP/IPPS 直连双通道），3D 打印机支持
+  **OctoPrint / Klipper-Moonraker / PrusaLink 三协议** + 局域网自动扫描，能看进度温度、能暂停取消。
+- **文件索引**：几十万份本地文件的秒搜 + 正文搜索（离线也能搜）。
+
+**手机 / 平板真能用**
+
+- **设备间互传文件**：手机拍照直接传到电脑，**原始字节直传不重编码**（EXIF 完整保留，
+  比截图/粘贴强得多）；有配额和过期清理。
+- **移动端外壳**：窄屏自动变抽屉 + 底部导航 + 左滑关闭。
+- **可安装 PWA**：装到桌面全屏无地址栏（`manifest` + Service Worker，network-first 所以改了立刻生效）。
+- **终端手机可用化**：21 键触控键帽行（44px 好点）、常用命令条、字号可调（手机与桌面各记一份，互不污染）。
+- **局域网直连**：手机连本机，可设口令也可关闸免密。
+
+**中英双语**
+
+- 界面语言**默认跟随系统**，顶栏 `ZH / EN` 一键切（也支持 `Ctrl+L` 和命令面板）。
+- 没翻译到的部分保持中文、不会变空白；语言包随项目一起走。
 
 ## 在微信里指挥它（企业微信双向通道）
 
@@ -217,16 +207,19 @@ Windows 也可以直接**双击 `start_workbench.bat`**（会自动起服务并�
 
 想用手机 / 外网访问你**自己本机**的能力：
 
-1. 在 `config.json` 加：
+1. 在 `config.json` 的 `remote` 段设：
    ```json
-   "remote": { "access_key": "一段强随机串", "cors": "", "bind": "0.0.0.0" }
+   "remote": { "bind": "0.0.0.0", "gate": true, "allow_lan": true, "token": "一段强随机串" }
    ```
-2. 启动：`python server.py 8777 --host 0.0.0.0`
-3. 内网穿透（示例，免费免账号）：`cloudflared tunnel --url http://localhost:8777`
+   - `gate: false` = 关闸：同一网段（手机、平板）**免密直进**，连终端接口也一并开放；
+   - `gate: true` = 开闸：非本机必须带口令（`?k=` 换 cookie），**且终端类接口只认本机**。
+2. 启动：`python server.py 8777`（`bind` 走配置，不用命令行参数）
+3. 内网穿透（示例，免费免账号）：`cloudflared tunnel --url http://127.0.0.1:8777`
 4. 手机开隧道地址即可。
 
-> ⚠️ 安全：绝不裸绑 `0.0.0.0` 不设 `access_key`；`access_key` 用强随机串。
-> 暴露本机 = 别人能跑你机器上的命令，必须口令到位才开远程。
+> ⚠️ 安全：**不要裸绑 `0.0.0.0` 又关闸**，那等于把你的文件索引和终端暴露给同网段任何人。
+> 要长期开着建议 `gate: true` + 强随机 `token`。终端接口（`/api/term`、`/api/bridge`）
+> 无论开关闸都只认本机 —— 手机端终端只在关闸模式下可用，开闸后会收到中文说明而不是直接报错。
 
 > 另注：把它部署成**纯静态站点**（没有本机后端）时，问一问 / OpenClaw / 文件 / 终端 / 系统
 > 这些依赖本机的能力不可用 —— 那只是个前端壳，界面会明确提示而不是白屏。
