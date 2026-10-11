@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OpenWorkbench — 让 AI 主动来找你</title>
+<meta name="description" content="本地优先的 AI 工作台：零第三方依赖，数据不出你的机器。早间邮件简报、微信里指挥打印、手机传原图、3D 打印机三协议、MCP 标准接口、中英双语。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="OpenWorkbench — 让 AI 主动来找你">
+<meta property="og:description" content="本地优先的 AI 工作台。零第三方依赖，数据不出你的机器。">
+<meta property="og:image" content="assets/og.png">
+<meta property="og:url" content="https://open-workbench.ccwu.cc/">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <button id="burger" aria-label="菜单" aria-expanded="false" aria-controls="navPanel"><span></span></button>
+    <a class="brand" href="index.html">
+      <img src="assets/icon.svg" alt="" width="26" height="26">
+      <span>OpenWorkbench</span>
+    </a>
+    <nav class="links">
+      <a href="index.html#does">它能做什么</a>
+      <a href="modules.html">模块</a>
+      <a href="integrations.html">支持列表</a>
+      <a href="install.html">安装</a>
+      <a href="https://github.com/ZhangZhangooo/open-workbench" class="btn btn-sm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="nav-panel" id="navPanel">
+  <a href="index.html">首页</a>
+  <a href="modules.html">25 个模块</a>
+  <a href="integrations.html">支持列表</a>
+  <a href="install.html">安装与运行</a>
+  <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub 仓库</a>
+</div>
+
+<main>
+
+<!-- ================= HERO ================= -->
+<section class="hero" id="top">
+  <div class="wrap hero-in">
+    <div class="hero-txt">
+      <p class="eyebrow">本地优先 · 零第三方依赖 · MIT</p>
+      <h1>让 AI <em>主动来找你</em><br>而不是你一直去问它</h1>
+      <p class="lede">
+        早上你还没看手机，要紧的邮件已经挑好了，回复草稿也写好了等你点确认。
+        在微信里发一句「把这个打出来」，纸就出来了。手机拍的照片，电脑上直接就有。
+      </p>
+      <div class="cta">
+        <a class="btn btn-lg" href="install.html">怎么装</a>
+        <a class="btn btn-lg btn-ghost" href="https://github.com/ZhangZhangooo/open-workbench">GitHub</a>
+      </div>
+      <div class="cmdrow">
+        <pre class="term"><code>git clone https://github.com/ZhangZhangooo/open-workbench
+python server.py 8777</code></pre>
+        <button class="copy" data-copy="git clone https://github.com/ZhangZhangooo/open-workbench
+python server.py 8777">复制</button>
+      </div>
+      <p class="tiny">Windows 直接双击 <code>start.bat</code></p>
+    </div>
+    <div class="hero-shot">
+      <div class="browser">
+        <div class="bar"><i class="d a"></i><i class="d b"></i><i class="d c"></i><span>127.0.0.1:8777</span></div>
+        <img src="assets/ui-home.png" alt="工作台界面截图">
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <ul class="pills">
+    <li><b data-count="0">0</b> 第三方依赖</li>
+    <li><b data-count="25">25</b> 个可配置模块</li>
+    <li><b data-count="2">2</b> 种语言</li>
+    <li><b data-count="3">3</b> 种 3D 打印机协议</li>
+    <li><b data-count="10">10</b> 个聊天通道</li>
+  </ul>
+</div>
+
+<!-- ================= 它能做什么 ================= -->
+<section id="does">
+  <div class="wrap">
+    <p class="kicker">它能做什么</p>
+    <h2>不是又一个聊天框</h2>
+    <div class="cards">
+      <article class="card">
+        <div class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M3 7l9 6 9-6"/></svg></div>
+        <h3>早间邮件简报</h3>
+        <p>定时挑出今天要紧的邮件，需要你回的那几封自动写好草稿。你点确认才发出。</p>
+      </article>
+      <article class="card">
+        <div class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/></svg></div>
+        <h3>微信里指挥它</h3>
+        <p>企业微信官方通道，在你自己的微信聊天框里发一句话，它干活，结果发回同一个框。</p>
+      </article>
+      <article class="card">
+        <div class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><rect x="6" y="14" width="12" height="7" rx="1"/></svg></div>
+        <h3>真打印</h3>
+        <p>普通打印机自动发现；3D 打印机支持 OctoPrint / Klipper / PrusaLink，能看进度和温度。</p>
+      </article>
+      <article class="card">
+        <div class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></div>
+        <h3>手机传原图</h3>
+        <p>设备间互传文件，原始字节直传不重编码，EXIF 完整保留。装成 PWA 当 App 用。</p>
+      </article>
+      <article class="card">
+        <div class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M7 10v4M11 10v4M15 10v4"/></svg></div>
+        <h3>MCP 标准接口</h3>
+        <p>把工作台注册成标准 MCP 工具，OpenClaw 直接调用，不是照着提示词猜接口。</p>
+      </article>
+      <article class="card">
+        <div class="ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="M6.5 9.5l3 2.5-3 2.5M12.5 15h5"/></svg></div>
+        <h3>真终端</h3>
+        <p>基于 Windows ConPTY 的真终端，手机上有 21 键触控键帽行和常用命令条。</p>
+      </article>
+    </div>
+    <div class="more">
+      <a class="btn btn-ghost" href="modules.html">看全部 25 个模块 →</a>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 界面 ================= -->
+<section id="shots">
+  <div class="wrap">
+    <p class="kicker">界面</p>
+    <h2>桌上和手机上都能用</h2>
+    <div class="shots">
+      <figure>
+        <div class="browser sm"><div class="bar"><i class="d a"></i><i class="d b"></i><i class="d c"></i></div>
+          <img src="assets/ui-printer.png" alt="打印机模块界面"></div>
+        <figcaption>打印机：自动发现本机设备，选文件直接印</figcaption>
+      </figure>
+      <figure>
+        <div class="phone">
+          <div class="notch"></div>
+          <img src="assets/ui-mobile-transfer.png" alt="手机端互传文件界面">
+        </div>
+        <figcaption>手机端：装成 App，照片直传电脑</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 为什么 ================= -->
+<section id="why">
+  <div class="wrap">
+    <p class="kicker">为什么是本地</p>
+    <h2>零依赖，不是营销词</h2>
+    <div class="why-grid">
+      <div class="why">
+        <h3>没有 requirements.txt</h3>
+        <p>只用 Python 标准库。<code>pip install</code> 什么都不用装，克隆下来就能跑。</p>
+      </div>
+      <div class="why">
+        <h3>数据一个字节都不出去</h3>
+        <p>邮件、文件、笔记、对话、索引全在本机 SQLite。没有云端，没有账号。</p>
+      </div>
+      <div class="why">
+        <h3>前端后端一体</h3>
+        <p><code>server.py</code> 同时托管界面和处理 API，一个进程，一个端口。</p>
+      </div>
+      <div class="why">
+        <h3>真能力，不是演示</h3>
+        <p>真终端、真打印、真 IMAP。真机跑不通的地方我在 README 里如实写了。</p>
+      </div>
+    </div>
+    <div class="more">
+      <a class="btn btn-ghost" href="integrations.html">看支持列表 →</a>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CTA ================= -->
+<section class="final">
+  <div class="wrap final-in">
+    <h2>试试它，或者提个 issue</h2>
+    <p class="lede">MIT 协议，随便用、随便改、随便骂。装完碰到什么问题，回来告诉我们。</p>
+    <div class="cta">
+      <a class="btn btn-lg" href="install.html">开始安装</a>
+      <a class="btn btn-lg btn-ghost" href="https://github.com/ZhangZhangooo/open-workbench/issues">提 issue</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div class="foot-l">
+      <img src="assets/icon.svg" alt="" width="20" height="20">
+      <span>OpenWorkbench</span>
+      <span class="sep">·</span>
+      <a href="modules.html">模块</a>
+      <span class="sep">·</span>
+      <a href="integrations.html">支持列表</a>
+      <span class="sep">·</span>
+      <a href="install.html">安装</a>
+      <span class="sep">·</span>
+      <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub</a>
+    </div>
+    <p class="foot-r">MIT License. 数据留在你自己的机器上。</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

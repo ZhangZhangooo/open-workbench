@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>25 个模块 — OpenWorkbench</title>
+<meta name="description" content="OpenWorkbench 的 25 个可配置模块：今日、任务、文件、OpenClaw、技能库、日历、会议、邮件、项目、笔记、资料库、系统、设置、生活、房间、番茄钟、习惯打卡、剪贴板、提醒、日志、小工具、系统工具、功能清单、互传、打印机。每个都能开关、改名、调顺序。">
+<meta property="og:title" content="25 个模块 — OpenWorkbench">
+<meta property="og:description" content="每个模块都能单独开关、改名、调顺序。">
+<meta property="og:image" content="assets/og.png">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <button id="burger" aria-label="菜单" aria-expanded="false" aria-controls="navPanel"><span></span></button>
+    <a class="brand" href="index.html"><img src="assets/icon.svg" alt="" width="26" height="26"><span>OpenWorkbench</span></a>
+    <nav class="links">
+      <a href="index.html#does">它能做什么</a>
+      <a href="modules.html">模块</a>
+      <a href="integrations.html">支持列表</a>
+      <a href="install.html">安装</a>
+      <a href="https://github.com/ZhangZhangooo/open-workbench" class="btn btn-sm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="nav-panel" id="navPanel">
+  <a href="index.html">首页</a>
+  <a href="modules.html">25 个模块</a>
+  <a href="integrations.html">支持列表</a>
+  <a href="install.html">安装与运行</a>
+  <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub 仓库</a>
+</div>
+
+<main>
+
+<section class="pagehead">
+  <div class="wrap">
+    <p class="kicker">模块</p>
+    <h1>25 个模块，<br>按你的需要拼</h1>
+    <p class="lede">
+      每个模块都能单独关掉、换名字、调顺序。不是让你适应它，是让它适应你。
+      设置页里改完立刻生效，不用刷新。
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="subnav">
+      <a href="#ai">AI 与自动化</a>
+      <a href="#day">日常</a>
+      <a href="#know">知识与资料</a>
+      <a href="#system">系统与工具</a>
+      <a href="#life">生活</a>
+      <a href="#hardware">硬件</a>
+    </div>
+
+    <!-- ===== AI 与自动化 ===== -->
+    <h2 id="ai">AI 与自动化</h2>
+    <div class="cards">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L3 21l1.9-6.4A8 8 0 1 1 21 12z"/></svg></div>
+        <h3>OpenClaw</h3><p>接本机 agent 干活。三个标签：问一问（Ollama 聊天）、干活（OpenClaw 执行）、文档（WPS 全套读写）。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"/></svg></div>
+        <h3>技能库</h3><p>管理本机的 agent 技能，可在线安装。每个技能是一个带说明的目录，agent 自己决定何时调用。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M7 10v4M11 10v4M15 10v4"/></svg></div>
+        <h3>MCP 接口</h3><p>把工作台注册成标准 MCP 工具，别的 agent 能正式调用，不用照着提示词猜接口。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M3 7l9 6 9-6"/></svg></div>
+        <h3>邮件</h3><p>直连 IMAP / SMTP，不依赖任何邮件客户端。收件箱、正文搜索（离线也能搜）、草稿、定时发件箱。</p></article>
+    </div>
+
+    <!-- ===== 日常 ===== -->
+    <h2 id="day">日常</h2>
+    <div class="cards">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg></div>
+        <h3>今日</h3><p>一天的待办。可按项目归属、可勾选、可被 agent 自动补。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5l2.5 2.5L11 5.5"/><path d="M4 16.5l2.5 2.5L11 14.5"/><path d="M14 8h6M14 17h6"/></svg></div>
+        <h3>任务</h3><p>比「今日」更长期的任务，有状态流转。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z"/><path d="M12 7.5v5l3.2 2"/></svg></div>
+        <h3>提醒</h3><p>到点弹桌面通知（页面开着时），可由 agent 自动创建。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="17" rx="2.5"/><path d="M7 3v3M17 3v3M3 10h18"/></svg></div>
+        <h3>日历</h3><p>日程安排，可由 agent 写入（待确认）。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5h17v11h-9l-4 3.5v-3.5h-4z"/></svg></div>
+        <h3>会议</h3><p>会议记录与在线会议链接，支持提前提醒。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 12a8.5 8.5 0 1 1-3.4-6.8"/><path d="M12 7.5V12l3.5 2"/></svg></div>
+        <h3>日志</h3><p>今天做了什么、按时间倒序。不用手写流水。</p></article>
+    </div>
+
+    <!-- ===== 知识与资料 ===== -->
+    <h2 id="know">知识与资料</h2>
+    <div class="cards">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M4 4.5h6a3 3 0 0 1 3 3v12a2.5 2.5 0 0 0-2.5-2.5H4z"/><path d="M20 4.5h-6a3 3 0 0 0-3 3v12a2.5 2.5 0 0 1 2.5-2.5H20z"/></svg></div>
+        <h3>资料库</h3><p>长文档归档，带标签，可全文搜。可由 agent 存入。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="4.5" y="3" width="15" height="18" rx="2"/><path d="M8.5 8h7M8.5 12h7M8.5 16h4"/></svg></div>
+        <h3>笔记</h3><p>随手记。比资料库轻，给还没整理的东西。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3.5 7.5l8.5-4 8.5 4v9l-8.5 4-8.5-4z"/><path d="M3.5 7.5l8.5 4 8.5-4M12 11.5v9"/></svg></div>
+        <h3>项目</h3><p>多条线并行，每条记下一步该做什么。agent 可推进。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="M2.5 8.5h19M6 6.2h.01M9 6.2h.01"/></svg></div>
+        <h3>文件</h3><p>本机几十万文件的秒搜 + 正文搜索。不是只搜文件名。</p></article>
+    </div>
+
+    <!-- ===== 系统与工具 ===== -->
+    <h2 id="system">系统与工具</h2>
+    <div class="cards">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="M6.5 9.5l3 2.5-3 2.5M12.5 15h5"/></svg></div>
+        <h3>系统</h3><p>真终端（Windows ConPTY）+ 磁盘、端口、进程状态。<b>不是网页里假装的那种 shell。</b></p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M14.5 3.5a4 4 0 0 0-5 5L3.5 14.5l6 6 6-6-6-6z" transform="translate(2 -2)"/><path d="M6 18l-2.5 2.5"/></svg></div>
+        <h3>系统工具</h3><p>端口占用、清理建议、环境体检。只列不删 —— 破坏性操作一律要你自己确认。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="7" r="2.5"/><circle cx="12" cy="17" r="2.5"/><path d="M9 8.6l1.8 5.6M15 8.6l-1.8 5.6M9.5 7h5"/></svg></div>
+        <h3>小工具</h3><p>二维码、单位换算、密码生成等零碎工具，装一起不占地方。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="3.5" y="3.5" width="17" height="17" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></div>
+        <h3>功能清单</h3><p>全部功能一张表，按域分组，告诉你每项是不是真能用。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 .3 1.8 1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg></div>
+        <h3>设置</h3><p>AI 接口、OCR 模型、索引范围、连接器、企业微信、局域网、备份、模块管理、语言。</p></article>
+    </div>
+
+    <!-- ===== 生活 ===== -->
+    <h2 id="life">生活</h2>
+    <div class="cards">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3.5 2"/></svg></div>
+        <h3>番茄钟</h3><p>计时 + 统计，一天到底干了多少有效时间。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V9a5 5 0 0 1 10 0v2"/><rect x="5" y="11" width="14" height="9" rx="2"/></svg></div>
+        <h3>习惯打卡</h3><p>连续天数 + 打卡日历。断了会提醒。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2.5"/><path d="M9 8.5h6M9 12h6"/></svg></div>
+        <h3>剪贴板</h3><p>本机剪贴板历史，按时间回溯。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5.5 9.5V21h13V9.5"/><path d="M10 21v-6h4v6"/></svg></div>
+        <h3>房间布置</h3><p>20 平米怎么摆：布局、设备位、网线走向、充电区，量化出来。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v4.8l3 2"/></svg></div>
+        <h3>生活</h3><p>记账 + 生活杂项。超支会顺带提醒。</p></article>
+    </div>
+
+    <!-- ===== 硬件 ===== -->
+    <h2 id="hardware">硬件</h2>
+    <div class="cards">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><rect x="6" y="14" width="12" height="7" rx="1"/></svg></div>
+        <h3>打印机</h3><p>普通打印机自动发现 + 3D 打印机三协议。自动出 PDF、唤起系统打印框、调份数纸张双面。</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></div>
+        <h3>互传</h3><p>设备间传文件，原始字节直传不重编码。配额度、过期清理、命中计数。</p></article>
+    </div>
+
+    <div class="more">
+      <a class="btn" href="integrations.html">看它接得上什么 →</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div class="foot-l">
+      <img src="assets/icon.svg" alt="" width="20" height="20">
+      <span>OpenWorkbench</span><span class="sep">·</span>
+      <a href="modules.html">模块</a><span class="sep">·</span>
+      <a href="integrations.html">支持列表</a><span class="sep">·</span>
+      <a href="install.html">安装</a><span class="sep">·</span>
+      <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub</a>
+    </div>
+    <p class="foot-r">MIT License. 数据留在你自己的机器上。</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

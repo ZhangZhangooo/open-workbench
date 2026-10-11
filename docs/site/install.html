@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>安装与运行 — OpenWorkbench</title>
+<meta name="description" content="OpenWorkbench 安装：只要 Python 3.8+，不用 pip install。Windows 双击 start.bat，macOS/Linux 三行命令。">
+<meta property="og:title" content="安装与运行 — OpenWorkbench">
+<meta property="og:description" content="只要 Python 3.8+，不用 pip install。">
+<meta property="og:image" content="assets/og.png">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-192px.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <button id="burger" aria-label="菜单" aria-expanded="false" aria-controls="navPanel"><span></span></button>
+    <a class="brand" href="index.html"><img src="assets/icon.svg" alt="" width="26" height="26"><span>OpenWorkbench</span></a>
+    <nav class="links">
+      <a href="index.html#does">它能做什么</a>
+      <a href="modules.html">模块</a>
+      <a href="integrations.html">支持列表</a>
+      <a href="install.html">安装</a>
+      <a href="https://github.com/ZhangZhangooo/open-workbench" class="btn btn-sm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="nav-panel" id="navPanel">
+  <a href="index.html">首页</a>
+  <a href="modules.html">25 个模块</a>
+  <a href="integrations.html">支持列表</a>
+  <a href="install.html">安装与运行</a>
+  <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub 仓库</a>
+</div>
+
+<main>
+
+<section class="pagehead">
+  <div class="wrap">
+    <p class="kicker">安装与运行</p>
+    <h1>三行命令，<br>或者双击一个文件</h1>
+    <p class="lede">
+      唯一的要求是 <b>Python 3.8 或更新</b>。<code>pip install</code> 一个都不用跑 ——
+      这是「零第三方依赖」的字面意思。
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="subnav">
+      <a href="#quick">最快路径</a>
+      <a href="#env">可选依赖</a>
+      <a href="#full">一键脚本</a>
+      <a href="#mobile">手机访问</a>
+      <a href="#trouble">遇到问题</a>
+    </div>
+
+    <!-- ===== 最快路径 ===== -->
+    <h2 id="quick">最快路径</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="n">1</span>
+        <div>
+          <h3>克隆</h3>
+          <div class="cmdrow">
+            <pre class="term"><code>git clone https://github.com/ZhangZhangooo/open-workbench
+cd open-workbench</code></pre>
+            <button class="copy" data-copy="git clone https://github.com/ZhangZhangooo/open-workbench
+cd open-workbench">复制</button>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <span class="n">2</span>
+        <div>
+          <h3>运行</h3>
+          <div class="cmdrow">
+            <pre class="term"><code>python server.py 8777</code></pre>
+            <button class="copy" data-copy="python server.py 8777">复制</button>
+          </div>
+          <p class="note"><b>Windows</b> 也可以直接双击 <code>start.bat</code> —— 它会先清掉旧实例、再带崩溃自动重启起服务、并自动开浏览器。</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="n">3</span>
+        <div>
+          <h3>打开</h3>
+          <div class="cmdrow">
+            <pre class="term"><code>http://127.0.0.1:8777</code></pre>
+            <button class="copy" data-copy="http://127.0.0.1:8777">复制</button>
+          </div>
+          <p class="note">就这样。不用装 Ollama 也能先跑起来看界面 —— 模型的事可以晚点再说。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="reqs">
+      <h3>需要准备什么</h3>
+      <ul>
+        <li><b>必需</b>：Python 3.8 或更新。别的什么都不用装。</li>
+        <li><b>可选</b>：Ollama（接本机 / 云端模型）、OpenClaw（接 agent 干活）。</li>
+        <li><b>可选</b>：WPS（文档读写）、Chrome 或 Edge（内容自动转 PDF）。</li>
+      </ul>
+    </div>
+
+    <!-- ===== 可选依赖 ===== -->
+    <h2 id="env">可选依赖</h2>
+    <div class="why-grid">
+      <div class="why">
+        <h3>Ollama</h3>
+        <p>接本机或 Ollama 云端模型。<b>不装也能用</b>，只是「问一问」会没有模型可问。
+        <a href="https://ollama.com/download" target="_blank" rel="noopener">官网下载</a></p>
+      </div>
+      <div class="why">
+        <h3>OpenClaw</h3>
+        <p>接 agent，让它真的去执行 —— 翻文件、跑命令、查系统。<code>npm install -g openclaw</code>。</p>
+      </div>
+      <div class="why">
+        <h3>WPS Office</h3>
+        <p>文档读写集成。仅 Windows。不是必需，缺了只是那个功能用不了。</p>
+      </div>
+    </div>
+
+    <!-- ===== 一键脚本 ===== -->
+    <h2 id="full">一键脚本（可选）</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>系统</th><th>命令</th></tr></thead>
+        <tbody>
+          <tr><td>Windows</td><td><code>powershell -ExecutionPolicy Bypass -File install.ps1</code></td></tr>
+          <tr><td>Windows（全自动）</td><td><code>powershell -ExecutionPolicy Bypass -File install.ps1 -Yes</code></td></tr>
+          <tr><td>macOS / Linux</td><td><code>sudo ./install.sh</code></td></tr>
+          <tr><td>macOS / Linux（全自动）</td><td><code>sudo ./install.sh --yes</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="reqs" style="margin-top:16px">
+      <h3>脚本会做什么</h3>
+      <ul>
+        <li>装 / 起 Ollama，拉对话模型 <code>gpt-oss:120b-cloud</code> 和看图模型 <code>gemma4:31b-cloud</code></li>
+        <li>装 OpenClaw，生成 <code>config.json</code> 指向你本机的 Ollama</li>
+        <li>默认每一步都把命令打出来等你按回车；加 <code>-Yes</code> 才自动</li>
+        <li><b>绝不覆盖你已有的 <code>config.json</code></b> —— 先备份成 <code>config.json.bak.&lt;时间戳&gt;</code></li>
+      </ul>
+    </div>
+
+    <!-- ===== 手机访问 ===== -->
+    <h2 id="mobile">手机 / 平板访问</h2>
+    <div class="why-grid">
+      <div class="why">
+        <h3>同一 Wi-Fi 直接开</h3>
+        <p><code>config.json</code> 里 <code>remote.gate</code> 设成 <code>false</code> 就是关闸模式，
+        同网段的手机平板免密直进。地址在「互传」页面上有现成的一键复制。</p>
+      </div>
+      <div class="why">
+        <h3>装成 App</h3>
+        <p>加到主屏幕即可全屏无地址栏。注意：<b>手机走 http 明文地址时浏览器不给注册 Service Worker</b>，
+        所以在手机上装不成完整 PWA —— 这是浏览器的安全规矩，不是 bug。</p>
+      </div>
+      <div class="why">
+        <h3>外网访问</h3>
+        <p>家里宽带没公网 IP，需要隧道。工作台的「企业微信」面板里已内置 cloudflared，
+        点一下「开隧道」就能拿到 https 地址。</p>
+      </div>
+    </div>
+
+    <!-- ===== 排错 ===== -->
+    <h2 id="trouble">遇到问题</h2>
+    <div class="reqs">
+      <ul>
+        <li><b>端口被占</b>：<code>start.bat</code> 会自动清掉占着 8777 的旧实例。手跑的话先关掉旧窗口。</li>
+        <li><b>PowerShell 报「文件未经数字签名」</b>：下载的 <code>.ps1</code> 带「来自 Internet」标记。
+            先跑 <code>Unblock-File install.ps1</code>，或把文件存到本机盘（D:）再执行。</li>
+        <li><b>macOS 报 <code>command not found: install.sh</code></b>：必须带 <code>./</code>。
+            当前目录不在 <code>$PATH</code> 里。</li>
+        <li><b>brew 拒绝以 root 运行</b>：这是 brew 的保护机制，脚本内部会自动降回你的用户身份执行。</li>
+        <li><b>看不到新功能 / 界面还是旧的</b>：浏览器 Ctrl+F5 强刷。静态资源已设 no-cache，
+            正常不会缓存，但浏览器有时候很犟。</li>
+      </ul>
+    </div>
+
+    <div class="more">
+      <a class="btn" href="https://github.com/ZhangZhangooo/open-workbench/issues">还有问题？提 issue</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div class="foot-l">
+      <img src="assets/icon.svg" alt="" width="20" height="20">
+      <span>OpenWorkbench</span><span class="sep">·</span>
+      <a href="modules.html">模块</a><span class="sep">·</span>
+      <a href="integrations.html">支持列表</a><span class="sep">·</span>
+      <a href="install.html">安装</a><span class="sep">·</span>
+      <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub</a>
+    </div>
+    <p class="foot-r">MIT License. 数据留在你自己的机器上。</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

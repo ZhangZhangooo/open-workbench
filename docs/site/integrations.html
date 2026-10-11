@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>支持列表 — OpenWorkbench</title>
+<meta name="description" content="OpenWorkbench 接得上什么：AI 模型、10 个聊天通道、5 个推送连接器、3 种 3D 打印机协议、IPP/IPPS 打印、IMAP/SMTP 邮件、各类文档格式。全部实测跑通。">
+<meta property="og:title" content="支持列表 — OpenWorkbench">
+<meta property="og:description" content="接得上什么，全部实测跑通。">
+<meta property="og:image" content="assets/og.png">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <button id="burger" aria-label="菜单" aria-expanded="false" aria-controls="navPanel"><span></span></button>
+    <a class="brand" href="index.html"><img src="assets/icon.svg" alt="" width="26" height="26"><span>OpenWorkbench</span></a>
+    <nav class="links">
+      <a href="index.html#does">它能做什么</a>
+      <a href="modules.html">模块</a>
+      <a href="integrations.html">支持列表</a>
+      <a href="install.html">安装</a>
+      <a href="https://github.com/ZhangZhangooo/open-workbench" class="btn btn-sm">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="nav-panel" id="navPanel">
+  <a href="index.html">首页</a>
+  <a href="modules.html">25 个模块</a>
+  <a href="integrations.html">支持列表</a>
+  <a href="install.html">安装与运行</a>
+  <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub 仓库</a>
+</div>
+
+<main>
+
+<section class="pagehead">
+  <div class="wrap">
+    <p class="kicker">支持列表</p>
+    <h1>接得上什么</h1>
+    <p class="lede">
+      下面每一项都是实测跑通的，不是「即将支持」。
+      没列出来的不一定不行，但至少我没亲手验过 —— 所以不写。
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="subnav">
+      <a href="#models">AI 模型</a>
+      <a href="#channels">聊天通道</a>
+      <a href="#push">推送</a>
+      <a href="#printer">打印机</a>
+      <a href="#docs">文档数据</a>
+      <a href="#platform">平台</a>
+    </div>
+
+    <div class="sup-grid">
+      <div class="sup" id="models">
+        <h3>AI 模型</h3>
+        <ul class="chips">
+          <li>Ollama 云端</li>
+          <li>Ollama 本地</li>
+          <li>GPT-OSS 120B</li>
+          <li>Qwen 2.5</li>
+          <li>Llama</li>
+          <li>任意 OpenAI 兼容接口</li>
+        </ul>
+        <p class="note">看图需要<b>视觉模型</b>。实测 Ollama 云端 17 个模型里只有 <code>gemma4:31b</code> 能看图，其他明确报「不支持图片」。</p>
+      </div>
+
+      <div class="sup" id="channels">
+        <h3>聊天通道</h3>
+        <ul class="chips">
+          <li><span class="ok">微信</span>（经企业微信）</li>
+          <li>Telegram</li>
+          <li>Discord</li>
+          <li>Slack</li>
+          <li>飞书</li>
+          <li>Signal</li>
+          <li>iMessage</li>
+          <li>Matrix</li>
+          <li>Teams</li>
+          <li>Line</li>
+          <li>SMS</li>
+          <li>Mattermost</li>
+        </ul>
+        <p class="note">全部走<b>官方接口</b>，不碰逆向协议 —— 逆向微信协议是封号最快的方式。已实测落地的是微信（企业微信自建应用 + 微信插件）。</p>
+      </div>
+
+      <div class="sup" id="push">
+        <h3>推送连接器</h3>
+        <ul class="chips">
+          <li>PushPlus</li>
+          <li>Server酱</li>
+          <li>企业微信</li>
+          <li>Webhook（任意 URL）</li>
+          <li>SMTP 邮件</li>
+        </ul>
+        <p class="note">结果能推到任何地方。停用不必删，每次推送都留日志。</p>
+      </div>
+
+      <div class="sup" id="printer3d">
+        <h3>3D 打印机</h3>
+        <ul class="chips">
+          <li><span class="ok">OctoPrint</span></li>
+          <li><span class="ok">Klipper / Moonraker</span></li>
+          <li><span class="ok">PrusaLink</span></li>
+        </ul>
+        <p class="note">局域网自动扫描（认特征路径，不瞎猜），能看进度、喷头与热床温度、剩余时间，能暂停继续取消。</p>
+      </div>
+
+      <div class="sup" id="printer">
+        <h3>普通打印机</h3>
+        <ul class="chips">
+          <li>Windows 打印队列</li>
+          <li>IPP 直连</li>
+          <li>IPPS（TLS）</li>
+          <li>WSD 设备</li>
+        </ul>
+        <p class="note">自动发现本机打印机，可指定份数、纸张、单双面。内容自动转 PDF 后调起系统打印框。</p>
+      </div>
+
+      <div class="sup" id="docs">
+        <h3>文档与数据</h3>
+        <ul class="chips">
+          <li>PDF</li>
+          <li>DOCX</li>
+          <li>XLSX</li>
+          <li>PPTX</li>
+          <li>Markdown</li>
+          <li>IMAP / SMTP</li>
+          <li>SQLite（本地）</li>
+          <li>JSON</li>
+        </ul>
+        <p class="note">数据落在本机 <code>data/app.db</code>，可导出备份。邮件正文读过一次就缓存到本机，之后离线也能搜。</p>
+      </div>
+    </div>
+
+    <!-- ===== 平台差异 ===== -->
+    <h2 id="platform">平台差异</h2>
+    <p class="table-hint">← 表格可以左右滑动看</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>能力</th><th>Windows</th><th>macOS / Linux</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>核心模块（对话、文件、项目、日历、邮件…）</td><td class="ok">可用</td><td class="ok">可用</td></tr>
+          <tr><td>内置终端（ConPTY）</td><td class="ok">可用</td><td class="no">不可用</td></tr>
+          <tr><td>WPS 文档读写</td><td class="ok">可用</td><td class="no">不可用</td></tr>
+          <tr><td>普通打印机模块</td><td class="ok">可用</td><td class="no">不可用</td></tr>
+          <tr><td>3D 打印机协议与局域网扫描</td><td class="ok">可用</td><td class="ok">可用</td></tr>
+          <tr><td>移动端外壳 / PWA / 互传文件</td><td class="ok">可用</td><td class="ok">可用</td></tr>
+          <tr><td>一键安装脚本</td><td class="ok">PowerShell</td><td class="ok">install.sh</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ===== 已知限制 ===== -->
+    <h2>说在前面：三个已知限制</h2>
+    <div class="why-grid">
+      <div class="why">
+        <h3>自动送印走系统打印框</h3>
+        <p>试过 11 条直写通道（winspool / IPP / IPPS / GDI / Chrome kiosk），
+        现代 IPP/WSD 打印机普遍拒绝应用层直写。最后用系统打印框 —— 走厂商驱动，
+        最稳，代价是你要点一下确认。</p>
+      </div>
+      <div class="why">
+        <h3>3D 打印只验到协议层</h3>
+        <p>用模拟器验的（OctoPrint / Klipper / PrusaLink 各自的真实响应）。
+        我没有 3D 打印机，所以真机没跑通过 —— 这一条我不含糊。</p>
+      </div>
+      <div class="why">
+        <h3>翻译只完成 10%</h3>
+        <p>界面语言跟随系统，中英双语。英文词条译了约 200 条（共 2048），
+        没译到的仍显示中文而不是变空白。</p>
+      </div>
+    </div>
+
+    <div class="more">
+      <a class="btn" href="install.html">下一步：安装 →</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div class="foot-l">
+      <img src="assets/icon.svg" alt="" width="20" height="20">
+      <span>OpenWorkbench</span><span class="sep">·</span>
+      <a href="modules.html">模块</a><span class="sep">·</span>
+      <a href="integrations.html">支持列表</a><span class="sep">·</span>
+      <a href="install.html">安装</a><span class="sep">·</span>
+      <a href="https://github.com/ZhangZhangooo/open-workbench">GitHub</a>
+    </div>
+    <p class="foot-r">MIT License. 数据留在你自己的机器上。</p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
