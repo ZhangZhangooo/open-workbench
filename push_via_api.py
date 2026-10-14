@@ -69,9 +69,13 @@ def main():
         return 1
 
     _, head, _ = git("rev-parse", "HEAD")
-    # ⚠️ 必须 %(subject) 而不是 %s：Windows 上 git 是 .cmd 包装器，
-    #    %s 会被 cmd 展开成空，commit message 取到空串
-    _, msg, _ = git("log", "-1", "--pretty=format:%(subject)")
+    # ⚠️ 取 commit message 别走 `--pretty=format:`，两个写法都是坑：
+    #    - `%s`：Windows 上 git 是 .cmd 包装器，参数经 cmd 展开 → 取到空串
+    #    - `%(subject)`：不是 git 合法占位符（subject 就是 %s），git 原样吐字面量
+    #    （后者已导致远端落过 3 条 message 为 "%(subject)" 的脏提交）
+    #    改用 `cat-file commit` 直读对象：message 在第一个空行之后，全程不含 %。
+    _, raw, _ = git("cat-file", "commit", "HEAD")
+    msg = raw.split("\n\n", 1)[1].strip() if "\n\n" in raw else ""
     _, branch, _ = git("rev-parse", "--abbrev-ref", "HEAD")
     if branch != BRANCH:
         print("当前分支不是 %s，是 %r —— 不处理" % (BRANCH, branch))

@@ -48,7 +48,11 @@ def main():
         return 1
 
     _, head, _ = git("rev-parse", "HEAD")
-    _, msg, _ = git("log", "-1", "--pretty=format:%(subject)")
+    # 取完整 commit message：不能走 `--pretty=format:`（%s 被 cmd 展开成空，
+    # %(subject) 又不是合法占位符、git 会原样吐字面量），改用 cat-file 读对象，
+    # message 在第一个空行之后，全程不含 %。
+    _, raw, _ = git("cat-file", "commit", "HEAD")
+    msg = raw.split("\n\n", 1)[1].strip() if "\n\n" in raw else ""
     _, branch, _ = git("rev-parse", "--abbrev-ref", "HEAD")
     if branch != BRANCH:
         print("分支不对：%r" % branch)
