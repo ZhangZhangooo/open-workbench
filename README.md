@@ -115,6 +115,29 @@ Windows 直接**双击 `start.bat`**（自动起服务 + 开浏览器 + 崩溃�
 启动前会精准清掉残留实例，不会像手点那样留着旧进程占着端口）。
 配置按需填，模板见 `config.example.json`。
 
+## 让它开机自己起来
+
+`start.bat` 会开浏览器、带 `pause`，适合手动用；想让它**静默常驻**就用仓库里的 `autostart.bat`：
+不开浏览器、不弹窗，先按命令行精确清掉残留的 `server.py` / `guard.py`，再用 `guard.py` 起服务（崩了自动重启）。
+
+> 为什么不能只按端口杀：`guard.py` 不监听端口，只清端口的活上一只 guard 会活着，
+> 并把旧版本重新拉起来 —— 这个坑是真踩过的，所以用 `killsrv.py` 按命令行精确匹配。
+
+**Windows**（不需要管理员权限、不写注册表）：`Win+R` → `shell:startup` 打开当前用户的启动文件夹，
+在里面放一个 `OpenWorkbench.bat`，内容一行：
+
+```bat
+call "C:\你的路径\workbench\autostart.bat"
+```
+
+用转发器而不是把 `autostart.bat` 复制进去：复制出来的是死副本，仓库里的脚本更新后启动文件夹里那份不会跟着变；
+而且 `autostart.bat` 内部靠 `cd /d "%~dp0"` 定位仓库，转发器能保证被调到的一直是仓库里那一份。
+
+**macOS / Linux**：没有现成脚本（各自 Python 路径与安装位置差异太大，写死更容易坏），
+直接用系统自带机制，把启动命令指向 `python3 <仓库路径>/server.py 8777` 即可 ——
+macOS 写 `~/Library/LaunchAgents/` 下的 plist（`RunAtLoad` + `KeepAlive`），
+Linux 写 `~/.config/systemd/user/` 下的 service（`Restart=always`）。
+
 ## 特性
 
 **跑起来很轻**
