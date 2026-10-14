@@ -182,6 +182,16 @@ DAY = lambda: time.strftime("%Y-%m-%d")  # noqa: E731
 
 LOOPBACK_IPS = ("127.0.0.1", "::1", "localhost")
 
+# 平台部署（容器 / PaaS / 发布沙箱）会注入 PORT 环境变量。这种环境里反向代理就挂在
+# 同容器 / 同主机的 127.0.0.1 上 —— 于是**每一个公网访客的 client_address 都是回环地址**。
+# 若还按「client_address 是回环 = 本机」来判，等于把所有公网请求都当成本机：
+# 口令门禁失效、终端 / 桥接 / 远程管理接口对全网开放。所以平台部署一律不认「本机」；
+# 本地直接跑时（环境里没有 PORT）行为完全不变。
+PLATFORM_DEPLOY = bool((os.environ.get("PORT") or "").strip())
+
+# 反向代理会带上这些头；本地直连不会有。带了就说明请求不是本机发出的。
+PROXY_HEADERS = ("X-Forwarded-For", "X-Real-IP", "Forwarded", "CF-Connecting-IP")
+
 # 这几类接口无论怎么配都只认本机：远程开 shell 等于把整台机器交出去，
 # 神经桥是「让 OpenClaw 替本机干活」的入口，也不该从局域网进来；
 # /api/remote 会回访问口令本身，更只能在主机上看。
@@ -2286,6 +2296,13 @@ class Handler(BaseHTTPRequestHandler):
     # ---- 局域网口令闸 ----
 
     def _is_local(self) -> bool:
+        # 平台部署：回环地址是反向代理，不是用户本机 —— 一律不认
+        if PLATFORM_DEPLOY:
+            return False
+        # 带了转发头 = 请求经过了代理，client_address 不可信
+        for _h in PROXY_HEADERS:
+            if self.headers.get(_h):
+                return False
         return self.client_address[0] in LOOPBACK_IPS
 
     def _cookie(self, name: str = "wb_key") -> str:
@@ -2301,14 +2318,23 @@ class Handler(BaseHTTPRequestHandler):
         本机（127.0.0.1）永远放行 —— 口令是给局域网加的，不是给自己加的。
         """
         self._wb_grant = False
-        if not remote_cfg()["gate"]:
-            # 关闸模式：不验口令，连 LOCAL_ONLY 的终端 / 桥接接口也一起放开
-            return True
         local = self._is_local()
         if p.startswith(LOCAL_ONLY_PREFIX):
-            if not local:
+            # 本机永远放行
+            if local:
+                return True
+            # 平台部署：终端 / 桥接 / 远程管理接口**恒只认本机**，公网一律挡 ——
+            # 绝不能因为 gate=False（关闸）就把「远程开 shell」的入口开放给全网
+            if PLATFORM_DEPLOY:
                 self._json({"ok": False, "error": "这个接口只允许本机调用"}, 403)
                 return False
+            # 本机部署：沿用「关闸 = 同网段也放开」的既有行为（自家局域网里手机要用终端）
+            if not remote_cfg()["gate"]:
+                return True
+            self._json({"ok": False, "error": "这个接口只允许本机调用"}, 403)
+            return False
+        if not remote_cfg()["gate"]:
+            # 关闸模式：不验口令，普通接口放开
             return True
         if local or p.startswith(LAN_GATE_EXEMPT):
             return True
