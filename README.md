@@ -249,6 +249,72 @@ Linux 写 `~/.config/systemd/user/` 下的 service（`Restart=always`）。
 > 另注：把它部署成**纯静态站点**（没有本机后端）时，问一问 / OpenClaw / 文件 / 终端 / 系统
 > 这些依赖本机的能力不可用 —— 那只是个前端壳，界面会明确提示而不是白屏。
 
+## 部署到线上（官方托管实例）
+
+OpenWorkbench 不只是能跑在你本机 —— 它已经被做成**真后端**部署到了线上沙箱，
+`server.py`（`ThreadingHTTPServer`）直接对外提供 `/api/*`，不再是套前端壳。
+
+### 端口与绑定：`PORT` + `0.0.0.0`
+
+线上由反向代理转发，服务必须能被代理打进来：
+
+- 服务读取 **`PORT` 环境变量**作为监听端口，并绑 **`0.0.0.0`**；
+- `server.py` 的 `main()` 已支持：环境里出现 `PORT` 就取它当端口并绑 `0.0.0.0`；
+- **本机直接跑**时没有 `PORT`，行为不变 —— 仍走 `config.json` 的 `bind` + 默认 `8777`。
+
+```bash
+# 线上启动（端口由环境变量 PORT 决定，这里以沙箱约定的 3000 为例）
+PORT=3000 python3 server.py
+```
+
+（纯标准库，**零第三方依赖**；`pymupdf` 仅 PDF 预览可选。）
+
+### 发布目录：只带这些
+
+把下面这份发布出去就够了，本机的开发/数据产物都不必带：
+
+| 必须 | 说明 |
+| --- | --- |
+| 12 个运行时模块 | `server.py`、`store.py`、`indexer.py`、`mail.py`、`docswrite.py`、`integrations.py`、`sysinfo.py`、`docsio.py`、`conpty.py`、`wecom.py`、`transfer.py`、`printers.py` |
+| `static/` | 前端 |
+| `config.json` | **见下，必须是去掉凭据的干净版** |
+
+不必带：`data/`（本机索引库约 280MB）、`.git`、`exports/`，以及 `mkcover*` / `i18n*` / `push_via_api` / `replay_on_remote` / `wb_mcp` 等开发脚本。
+
+### ⚠️ 绝不能原样发布本机 `config.json`
+
+本机 `config.json` 含**真实邮箱授权码、AI key 等凭据**。发布请用一份去掉所有凭据的干净配置：
+
+- `mail.password`、`ai.api_key`、`wecom.secret` 等敏感字段**一律留空**；
+- 沿用 `.gitignore` 的约定，`config.json` 本就不进仓库 —— 线上也同理，别把它带进发布包。
+
+### 口令闸门（远程访问保护）
+
+线上绑了非回环地址，需要一道访问口令：
+
+- 在 `config.json` 的 `remote` 段设 `bind: "0.0.0.0"`、`gate: true`、`token: "<你的访问口令>"`；
+- 若 `bind` 非回环 + `gate: true` + `token` 留空，服务会**自动生成**一个随机口令并写回 `config.json`；
+- 远程访问时用 `https://<你的地址>/?k=<token>` 点一次即可种下 cookie，之后免再输；
+- `127.0.0.1` 本机永远免口令；`/api/term`、`/api/bridge`、`/api/remote` 这几类接口**只允许本机**调用。
+
+### 可照抄的最小步骤
+
+```bash
+# 1. 准备发布目录
+mkdir publish && cd publish
+cp ../server.py ../store.py ../indexer.py ../mail.py ../docswrite.py \
+   ../integrations.py ../sysinfo.py ../docsio.py ../conpty.py \
+   ../wecom.py ../transfer.py ../printers.py .
+cp -r ../static .
+# 2. 放一份去掉凭据的干净 config.json（mail.password / ai.api_key 等留空）
+cp ../config.example.json ./config.json
+# 3. 按需打开口令闸门（编辑 config.json 的 remote 段：bind=0.0.0.0, gate=true, token=<你的访问口令>）
+# 4. 启动（端口由 PORT 决定，沙箱用 3000）
+PORT=3000 python3 server.py
+```
+
+> 提示：线上地址需要访问口令，拿到口令后用 `/?k=<token>` 打开一次即可。
+
 ## 开源回环
 
 这是一个开放的产品：每个使用者跑自己的实例、连自己本机的 openclaw/ollama、各自做内网穿透。

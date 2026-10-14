@@ -380,13 +380,13 @@ def _textbox(sid: int, name: str, x: int, y: int, cx: int, cy: int,
             rs.append(f'<a:r><a:rPr lang="zh-CN" sz="{sz}"{battr} dirty="0">'
                       f'<a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr>'
                       f'<a:t>{_esc(t)}</a:t></a:r>')
-        ps.append(f'<a:p><a:pPr algn="l"/>{''.join(rs)}</a:p>')
+        ps.append(f'<a:p><a:pPr algn="l"/>{"".join(rs)}</a:p>')
     return (f'<p:sp><p:nvSpPr><p:cNvPr id="{sid}" name="{_esc(name)}"/>'
             '<p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>'
             f'<p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
             '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>'
             '<p:txBody><a:bodyPr wrap="square"><a:normAutofit/></a:bodyPr><a:lstStyle/>'
-            f'{''.join(ps)}</p:txBody></p:sp>')
+            f'{"".join(ps)}</p:txBody></p:sp>')
 
 
 def _slide_xml(sl: dict, first: bool) -> str:
