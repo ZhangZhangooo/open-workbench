@@ -14,10 +14,14 @@ is_active() 恒为 False，前端据此回退到原来的非交互「运行一�
 from __future__ import annotations
 
 import ctypes
-import msvcrt
 import os
 import threading
 import time
+
+try:
+    import msvcrt          # Windows 专有：start_session 里把管道句柄转成 fd 要用
+except Exception:  # noqa: BLE001
+    msvcrt = None          # 非 Windows 就是 None，下面按「不支持 ConPTY」降级
 
 try:
     import ctypes.wintypes as wt
@@ -27,7 +31,7 @@ except Exception:  # noqa: BLE001
 AVAILABLE = False
 _REASON = ""
 
-if wt is not None:
+if wt is not None and msvcrt is not None:
     try:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -108,7 +112,7 @@ if wt is not None:
     except Exception as e:  # noqa: BLE001
         _REASON = f"ConPTY 初始化失败：{e}"
 else:
-    _REASON = "非 Windows 平台，没有 ConPTY"
+    _REASON = "非 Windows 平台（缺 ctypes.wintypes 或 msvcrt），没有 ConPTY"
 
 
 # ---------------- 会话表（多标签） ----------------

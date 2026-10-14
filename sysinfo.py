@@ -1,11 +1,22 @@
-"""系统信息：内存、磁盘、CPU、进程。零依赖，ctypes + tasklist。"""
+"""系统信息：内存、磁盘、CPU、进程。零依赖，ctypes + tasklist。
+
+Windows 专用实现（GlobalMemoryStatusEx / GetDiskFreeSpaceExW / GetSystemTimes /
+tasklist）。**非 Windows 上本模块照样要能导入** —— 否则 server.py 第 38 行的
+`import sysinfo` 会在导入期就抛，整个工作台在 macOS / Linux 上起不来。
+所以 ctypes.wintypes 走 try 导入，真正的平台判断交给各函数本身
+（mem / disks / cpu 会抛 AttributeError，调用方一律 try/except 兜成 0 / []）。
+"""
 
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
 import subprocess
 import time
+
+try:
+    import ctypes.wintypes  # noqa: F401  Windows 专有；这里只是让它可用，不引用符号
+except Exception:  # noqa: BLE001
+    pass
 
 
 class MEMORYSTATUSEX(ctypes.Structure):
