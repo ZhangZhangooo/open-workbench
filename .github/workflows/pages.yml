@@ -1,0 +1,54 @@
+# 把 docs/site/ 发布到 GitHub Pages。
+#
+# 为什么走 Actions 而不是 Pages 的「分支 + 目录」模式：
+#   Pages 的目录模式只认仓库根的 / 或 /docs，不认 /docs/site；
+#   而 docs/ 下面同时放着封面图（docs/cover*.png、docs/social-preview.png 等），
+#   把站点根设成 /docs 会把这些图一起挂到站点根路径上，发布面不干净。
+#   用 upload-pages-artifact 只挑 docs/site 作为唯一产物。
+#
+# .nojekyll：docs/site/.nojekyll 随产物一起上传，跳过 Jekyll 处理，
+#   保证以 _ 开头的文件/目录不会被吞掉。
+name: Deploy site to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
