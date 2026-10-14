@@ -5498,6 +5498,18 @@ def main():
         port = int(argv[0])
     if "--host" in argv:
         host = argv[argv.index("--host") + 1]
+
+    # 平台部署（容器 / PaaS / 发布沙箱）统一用 PORT 环境变量给端口，
+    # 而且必须绑 0.0.0.0 才能被反向代理打到。所以环境里一出现 PORT 就按这个约定走：
+    # 端口取 PORT、主机绑 0.0.0.0（**会盖掉 config 里的 bind**，想改就用 --host 覆盖）。
+    # 本机直接跑时环境里没有 PORT，行为完全不变（仍是 config 的 bind + 8777）。
+    env_port = (os.environ.get("PORT") or "").strip()
+    if env_port.isdigit():
+        if not (argv and argv[0].isdigit()):
+            port = int(env_port)
+        if "--host" not in argv:
+            host = "0.0.0.0"
+
     SERVER_PORT = port
     BOUND_HOST = host
     open_bind = host not in ("127.0.0.1", "::1", "localhost")
